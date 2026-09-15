@@ -357,7 +357,7 @@ async function ensureSchema() {
     CREATE TABLE IF NOT EXISTS booking_rooms (
       id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       booking_id       UUID NOT NULL REFERENCES bookings(id)   ON DELETE CASCADE,
-      room_id          UUID NOT NULL REFERENCES rooms(id)      ON DELETE RESTRICT,
+      room_id          UUID REFERENCES rooms(id)               ON DELETE RESTRICT,
       room_type_id     UUID NOT NULL REFERENCES room_types(id) ON DELETE RESTRICT,
       price_per_night  NUMERIC(10, 2) NOT NULL,
       nights           SMALLINT NOT NULL CHECK (nights >= 1),
@@ -365,6 +365,7 @@ async function ensureSchema() {
       created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
+  await pool.query(`ALTER TABLE booking_rooms ALTER COLUMN room_id DROP NOT NULL`)
 
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS ux_booking_rooms_booking_room

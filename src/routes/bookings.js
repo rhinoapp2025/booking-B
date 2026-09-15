@@ -251,7 +251,7 @@ router.post('/:hotelSlug', auth, async (req, res) => {
             throw Object.assign(new Error('ไม่มีห้องว่างในช่วงวันที่เลือก'), { status: 409 })
           }
           const unpushed = await client.query(
-            `SELECT COUNT(DISTINCT br.room_id)::int AS n
+            `SELECT COUNT(DISTINCT b.id)::int AS n
              FROM booking_rooms br
              JOIN bookings b ON b.id = br.booking_id
              WHERE b.hotel_id = $1 AND br.room_type_id = $2
@@ -266,24 +266,28 @@ router.post('/:hotelSlug', auth, async (req, res) => {
         }
       }
 
-      // หาห้องว่าง — lock for update
-      const bookedResult = await client.query(
-        `SELECT DISTINCT br.room_id FROM booking_rooms br
-         JOIN bookings b ON b.id = br.booking_id
-         WHERE b.hotel_id = $1 AND ${ROOM_HOLD_STATUS_SQL}
-           AND b.check_in_date < $3 AND b.check_out_date > $2`,
-        [hotel.id, check_in_date, check_out_date]
-      )
-      const bookedIds = bookedResult.rows.map(r => r.room_id)
+      // จองล่วงหน้าโหมด PMS: ไม่ยึดเลขห้อง — นับโควตาจากประเภทเท่านั้น
+      let roomId = null
+      if (!pmsSellableOn) {
+        const bookedResult = await client.query(
+          `SELECT DISTINCT br.room_id FROM booking_rooms br
+           JOIN bookings b ON b.id = br.booking_id
+           WHERE b.hotel_id = $1 AND ${ROOM_HOLD_STATUS_SQL}
+             AND b.check_in_date < $3 AND b.check_out_date > $2
+             AND br.room_id IS NOT NULL`,
+          [hotel.id, check_in_date, check_out_date]
+        )
+        const bookedIds = bookedResult.rows.map(r => r.room_id)
 
-      const roomQuery = bookedIds.length > 0
-        ? `SELECT id FROM rooms WHERE hotel_id = $1 AND room_type_id = $2 AND status = 'available'
-           AND id NOT IN (${bookedIds.map((_, i) => `$${i + 3}`).join(',')}) LIMIT 1 FOR UPDATE SKIP LOCKED`
-        : `SELECT id FROM rooms WHERE hotel_id = $1 AND room_type_id = $2 AND status = 'available' LIMIT 1 FOR UPDATE SKIP LOCKED`
+        const roomQuery = bookedIds.length > 0
+          ? `SELECT id FROM rooms WHERE hotel_id = $1 AND room_type_id = $2 AND status = 'available'
+             AND id NOT IN (${bookedIds.map((_, i) => `$${i + 3}`).join(',')}) LIMIT 1 FOR UPDATE SKIP LOCKED`
+          : `SELECT id FROM rooms WHERE hotel_id = $1 AND room_type_id = $2 AND status = 'available' LIMIT 1 FOR UPDATE SKIP LOCKED`
 
-      const roomResult = await client.query(roomQuery, [hotel.id, room_type_id, ...bookedIds])
-      if (!roomResult.rows[0]) throw Object.assign(new Error('ไม่มีห้องว่างในช่วงวันที่เลือก'), { status: 409 })
-      const roomId = roomResult.rows[0].id
+        const roomResult = await client.query(roomQuery, [hotel.id, room_type_id, ...bookedIds])
+        if (!roomResult.rows[0]) throw Object.assign(new Error('ไม่มีห้องว่างในช่วงวันที่เลือก'), { status: 409 })
+        roomId = roomResult.rows[0].id
+      }
 
       let pricePerNight = 0
       let abfPerPerson = 0

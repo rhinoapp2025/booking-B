@@ -116,7 +116,7 @@ async function readOtaBookingNo({ dbName, resvNo, fallback }) {
   return clip(fallback, 20) || ''
 }
 
-async function saveKioskBookingToPms({ settings, payload }) {
+async function saveKioskBookingToPms({ settings, payload, assignRoom = true }) {
   const dbName  = settings.kiosk_db_name
   const hotelID = settings.kiosk_hotel_id
   const comNo   = settings.kiosk_com_no
@@ -131,7 +131,10 @@ async function saveKioskBookingToPms({ settings, payload }) {
   if (!payload.ArrivalDate || !payload.DeptDate || !payload.RoomType) {
     throw new Error('ข้อมูลวันเข้าพักหรือประเภทห้องไม่ครบ')
   }
-  const assignedRoomNo = await pickPmsRoomNo({ settings, payload })
+  // จองล่วงหน้า: บันทึกแค่ประเภทห้อง ไม่ยึดเลขห้อง — โรงแรมจัดห้องตอนเช็คอิน
+  const assignedRoomNo = assignRoom
+    ? await pickPmsRoomNo({ settings, payload })
+    : clip(payload.RoomNo, 7)
 
   const pool = await connectDynamicDB(dbName)
   const transaction = new sql.Transaction(pool)
@@ -197,7 +200,7 @@ async function saveKioskBookingToPms({ settings, payload }) {
         .input('RoomRateCode', sql.VarChar(7), ' ')
         .input('RoomRateAmt', sql.Float, Number(payload.RoomRateAmt) || 0)
         .input('RoomFeature', sql.VarChar(20), '')
-        .input('RoomNo', sql.VarChar(7), assignedRoomNo)
+        .input('RoomNo', sql.VarChar(7), assignedRoomNo || ' ')
         .input('DepositAmt', sql.Float, 0)
         .input('PaymentType', sql.VarChar(5), '')
         .input('CreditLimit', sql.Float, 0)
@@ -273,7 +276,7 @@ async function saveKioskBookingToPms({ settings, payload }) {
       resvNo: newResvNo,
       fallback: payload.OTABookingNo,
     })
-    return { newResvNo, roomNo: assignedRoomNo, totalGuests: adultCount, otaBookingNo }
+    return { newResvNo, roomNo: assignedRoomNo || null, totalGuests: adultCount, otaBookingNo }
   } catch (err) {
     try { await transaction.rollback() } catch { /* ignore */ }
     throw err
@@ -369,7 +372,7 @@ async function pushBookingToPms(pg, hotelId, bookingId) {
     GstChildren: row.num_children,
     nights,
     RoomType: row.room_type_name,
-    RoomNo: row.room_number,
+    RoomNo: '',
     RoomRateAmt: roomRateAmt,
     AbfAdult: abfAdult,
     AbfAmt: abfAmt,
@@ -392,28 +395,14 @@ async function pushBookingToPms(pg, hotelId, bookingId) {
   }
 
   try {
-    const result = await saveKioskBookingToPms({ settings, payload })
+    const result = await saveKioskBookingToPms({ settings, payload, assignRoom: false })
     await pg.query(
       `UPDATE bookings
        SET pms_resv_no = $3, pms_room_no = $4, pms_ota_booking_no = $5,
            pms_sent_at = NOW(), pms_last_error = NULL, updated_at = NOW()
        WHERE id = $1 AND hotel_id = $2`,
-      [bookingId, hotelId, String(result.newResvNo), result.roomNo, result.otaBookingNo || guestOtaBookingNo(row.id)]
+      [bookingId, hotelId, String(result.newResvNo), result.roomNo || null, result.otaBookingNo || guestOtaBookingNo(row.id)]
     )
-    if (result.roomNo && normRoom(result.roomNo) !== normRoom(row.room_number)) {
-      const localRoom = await pg.query(
-        `SELECT id FROM rooms
-         WHERE hotel_id = $1 AND UPPER(TRIM(room_number)) = UPPER(TRIM($2))
-         LIMIT 1`,
-        [hotelId, result.roomNo]
-      )
-      if (localRoom.rows[0]) {
-        await pg.query(
-          `UPDATE booking_rooms SET room_id = $2 WHERE booking_id = $1`,
-          [bookingId, localRoom.rows[0].id]
-        )
-      }
-    }
     return result
   } catch (err) {
     await pg.query(

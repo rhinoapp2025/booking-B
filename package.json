@@ -1,0 +1,29 @@
+{
+  "name": "bookinghotel-backend",
+  "version": "1.0.0",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "create-admin": "node scripts/create-admin.js",
+    "test": "node --test test/**/*.test.js",
+    "test:unit": "node --test test/**/*.test.js --test-reporter spec",
+    "test:admin-api": "node --test test/admin-api.test.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^13.10.0",
+    "jsonwebtoken": "^9.0.2",
+    "mssql": "^12.7.0",
+    "passport": "^0.7.0",
+    "passport-facebook": "^3.0.0",
+    "passport-google-oauth20": "^2.0.0",
+    "passport-line": "^0.0.4",
+    "pg": "^8.21.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}

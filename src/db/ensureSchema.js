@@ -692,6 +692,8 @@ async function ensureSchema() {
     FROM (VALUES
       ('deposit_percent',           '30'),
       ('payment_collect_mode',      'deposit'),
+      ('service_charge_percent',    '0'),
+      ('vat_percent',               '0'),
       ('auto_cancel_hours',         '24'),
       ('cancellation_policy',       ''),
       ('non_smoking',               'false'),

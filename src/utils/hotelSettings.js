@@ -13,6 +13,8 @@ const DEFAULTS = {
   coupon_completion_points: '5',
   unpaid_auto_cancel_enabled: 'true',
   payment_collect_mode:       'deposit',
+  service_charge_percent:     '0',
+  vat_percent:                '0',
   promptpay_number:         '',
   bank_name:                '',
   bank_account_name:        '',

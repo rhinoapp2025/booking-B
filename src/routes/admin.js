@@ -271,6 +271,17 @@ router.post('/:hotelSlug/bookings', requireHotelAdmin, async (req, res) => {
         breakfastCount: channelQuote.breakfast_count,
       }
 
+      const paySettings = await getHotelSettings(client, hotel.id, [
+        'payment_collect_mode', 'service_charge_percent', 'vat_percent',
+      ])
+      const { applyStayCharges } = require('../utils/stayCharges')
+      const charged = applyStayCharges(subtotal, {
+        collectFull: paySettings.payment_collect_mode === 'full',
+        serviceChargePercent: paySettings.service_charge_percent,
+        vatPercent: paySettings.vat_percent,
+      })
+      const payable = charged.total
+
       const fullGuestName = [
         guest_title, guest_first_name, guest_last_name,
       ].filter(Boolean).join(' ').trim() || guest_name || null
@@ -290,7 +301,7 @@ router.post('/:hotelSlug/bookings', requireHotelAdmin, async (req, res) => {
         [
           hotel.id, req.user.id, check_in_date, check_out_date,
           Math.max(1, Number(num_adults) || 1), Math.max(0, Number(num_children) || 0),
-          subtotal, special_requests || null,
+          payable, special_requests || null,
           fullGuestName, guest_phone || null, guest_email || null,
           guest_title || null, guest_first_name || null, guest_last_name || null,
           guest_sex || null, guest_nation || null,

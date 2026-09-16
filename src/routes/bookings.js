@@ -338,13 +338,21 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       const payEnabled = await isHotelFeatureEnabled(client, hotel.id, 'feat_payment_slip')
       const settings = await getHotelSettings(client, hotel.id, [
         'deposit_percent', 'payment_collect_mode', 'kiosk_enabled',
+        'service_charge_percent', 'vat_percent',
       ])
       const collectFull = settings.payment_collect_mode === 'full'
+      const { applyStayCharges } = require('../utils/stayCharges')
+      const charged = applyStayCharges(subtotal, {
+        collectFull,
+        serviceChargePercent: settings.service_charge_percent,
+        vatPercent: settings.vat_percent,
+      })
+      const payable = charged.total
       let depositPercent = collectFull ? 100 : Number(settings.deposit_percent)
       if (!Number.isFinite(depositPercent) || depositPercent < 0) depositPercent = 30
       if (depositPercent > 100) depositPercent = 100
 
-      const depositAmount = payEnabled ? Math.ceil(subtotal * (depositPercent / 100)) : 0
+      const depositAmount = payEnabled ? Math.ceil(payable * (depositPercent / 100)) : 0
       const pmsOn = settings.kiosk_enabled === 'true'
       const bookingStatus = payEnabled && depositAmount > 0
         ? 'awaiting_payment'
@@ -367,7 +375,7 @@ router.post('/:hotelSlug', auth, async (req, res) => {
          RETURNING *`,
         [
           hotel.id, req.user.id, check_in_date, check_out_date,
-          num_adults, num_children, bookingStatus, subtotal, depositAmount,
+          num_adults, num_children, bookingStatus, payable, depositAmount,
           special_requests || null,
           fullGuestName, guest_phone || null, guest_email || null,
           guest_title || null, guest_first_name || null, guest_last_name || null,

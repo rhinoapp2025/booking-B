@@ -24,6 +24,8 @@ const CONFIG_SETTING_KEYS = [
   'bank_account_no',
   'deposit_percent',
   'payment_collect_mode',
+  'service_charge_percent',
+  'vat_percent',
   'auto_cancel_hours',
   'unpaid_auto_cancel_enabled',
   'cancellation_policy',
@@ -90,10 +92,14 @@ function pickHotelFields(body) {
 function pickConfigSettings(body) {
   const src = body?.settings && typeof body.settings === 'object' ? body.settings : body
   const patch = {}
+  const { sanitizePercentSetting } = require('./stayCharges')
   for (const key of CONFIG_SETTING_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(src, key)) {
-      patch[key] = src[key] == null ? '' : String(src[key])
+    if (!Object.prototype.hasOwnProperty.call(src, key)) continue
+    if (key === 'service_charge_percent' || key === 'vat_percent') {
+      patch[key] = sanitizePercentSetting(src[key])
+      continue
     }
+    patch[key] = src[key] == null ? '' : String(src[key])
   }
   return sanitizeThemeSettings(patch)
 }

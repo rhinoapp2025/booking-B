@@ -241,6 +241,7 @@ router.get('/:slug/payment', async (req, res) => {
     const settings = await getHotelSettings(pool, hotelRow.rows[0].id, [
       'promptpay_number', 'bank_name', 'bank_account_name', 'bank_account_no',
       'deposit_percent', 'payment_collect_mode',
+      'service_charge_percent', 'vat_percent',
     ])
     res.json({
       promptpay_number:      settings.promptpay_number || '',
@@ -249,6 +250,8 @@ router.get('/:slug/payment', async (req, res) => {
       bank_account_no:       settings.bank_account_no || '',
       deposit_percent:       Number(settings.deposit_percent) || 30,
       payment_collect_mode:  settings.payment_collect_mode === 'full' ? 'full' : 'deposit',
+      service_charge_percent: Number(settings.service_charge_percent) || 0,
+      vat_percent:           Number(settings.vat_percent) || 0,
     })
   } catch (err) {
     res.status(500).json({ error: err.message })

@@ -6,7 +6,7 @@ const { notifyAdminNewBookingChat, notifyBookingCancelledChat } = require('../ut
 const { emitBookingChanged } = require('../utils/bookingEvents')
 const {
   parseBase64Image, saveBookingPaymentSlip, deletePaymentSlipByBookingId,
-  readBookingPaymentSlip, MIME_EXT: SLIP_MIME_EXT,
+  readBookingPaymentSlip, EXT_MIME: SLIP_EXT_MIME,
 } = require('../utils/bookingPaymentSlips')
 const { notifyAdminPaymentSlipChat } = require('../utils/bookingChatNotify')
 const { getHotelSettings } = require('../utils/hotelSettings')
@@ -541,9 +541,10 @@ router.get('/:hotelSlug/:bookingId/slip', auth, async (req, res) => {
     )
     if (!slipResult.rows[0]) return res.status(404).json({ error: 'Slip not found' })
 
-    const { buffer, ext } = await readBookingPaymentSlip(slipResult.rows[0].slip_filename)
-    const mime = SLIP_MIME_EXT[ext] || 'application/octet-stream'
-    res.set('Content-Type', mime).send(buffer)
+    const slip = await readBookingPaymentSlip(slipResult.rows[0].slip_filename)
+    if (!slip) return res.status(404).json({ error: 'Slip file not found' })
+    const mime = SLIP_EXT_MIME[slip.ext] || 'application/octet-stream'
+    res.set('Content-Type', mime).send(slip.buffer)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

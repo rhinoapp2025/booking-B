@@ -26,13 +26,16 @@ function getChatImageCacheMaxAge() {
 
 function parseBase64Image(imageData, imageMime) {
   if (!imageData) return null
-  const mime = String(imageMime || '').toLowerCase().trim()
-  const ext  = MIME_EXT[mime]
-  if (!ext) return { error: 'รองรับเฉพาะ JPG, PNG, WebP, GIF' }
 
   let b64 = String(imageData)
-  const match = b64.match(/^data:[^;]+;base64,(.+)$/i)
-  if (match) b64 = match[1]
+  const match = b64.match(/^data:([^;]+);base64,(.+)$/i)
+  const mimeFromData = match ? String(match[1] || '').toLowerCase().trim() : ''
+  if (match) b64 = match[2]
+
+  let mime = String(imageMime || mimeFromData || '').toLowerCase().trim()
+  if (mime === 'image/jpg' || mime === 'image/pjpeg') mime = 'image/jpeg'
+  const ext  = MIME_EXT[mime]
+  if (!ext) return { error: 'รองรับเฉพาะ JPG, PNG, WebP, GIF' }
 
   let buffer
   try { buffer = Buffer.from(b64, 'base64') } catch { return { error: 'รูปภาพไม่ถูกต้อง' } }

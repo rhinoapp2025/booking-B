@@ -3,7 +3,7 @@ const auth    = require('../middleware/authMiddleware')
 const { getPool, withTransaction } = require('../db/pool')
 const { emitBookingChanged } = require('../utils/bookingEvents')
 const { notifyBookingCancelledChat } = require('../utils/bookingChatNotify')
-const { deletePaymentSlipByBookingId, readBookingPaymentSlip, MIME_EXT: SLIP_MIME_EXT } = require('../utils/bookingPaymentSlips')
+const { deletePaymentSlipByBookingId, readBookingPaymentSlip, EXT_MIME: SLIP_EXT_MIME } = require('../utils/bookingPaymentSlips')
 const { getChatNotifySettings, setChatNotifySettings } = require('../utils/chatNotifySettings')
 const { getHotelSettings, setHotelSettings } = require('../utils/hotelSettings')
 const { setCouponSettings, awardCompletionPoints } = require('../utils/couponSettings')
@@ -466,8 +466,9 @@ router.get('/:hotelSlug/bookings/:bookingId/slip', requireHotelAdmin, async (req
     )
     if (!slipResult.rows[0]) return res.status(404).json({ error: 'Slip not found' })
 
-    const { buffer, ext } = await readBookingPaymentSlip(slipResult.rows[0].slip_filename)
-    res.set('Content-Type', SLIP_MIME_EXT[ext] || 'application/octet-stream').send(buffer)
+    const slip = await readBookingPaymentSlip(slipResult.rows[0].slip_filename)
+    if (!slip) return res.status(404).json({ error: 'Slip file not found' })
+    res.set('Content-Type', SLIP_EXT_MIME[slip.ext] || 'application/octet-stream').send(slip.buffer)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

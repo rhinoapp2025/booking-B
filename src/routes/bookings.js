@@ -341,7 +341,7 @@ router.post('/:hotelSlug', auth, async (req, res) => {
         'service_charge_percent', 'vat_percent',
       ])
       const collectFull = settings.payment_collect_mode === 'full'
-      const { applyStayCharges } = require('../utils/stayCharges')
+      const { applyStayCharges, roundMoney } = require('../utils/stayCharges')
       const charged = applyStayCharges(subtotal, {
         collectFull,
         serviceChargePercent: settings.service_charge_percent,
@@ -352,7 +352,7 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       if (!Number.isFinite(depositPercent) || depositPercent < 0) depositPercent = 30
       if (depositPercent > 100) depositPercent = 100
 
-      const depositAmount = payEnabled ? Math.ceil(payable * (depositPercent / 100)) : 0
+      const depositAmount = payEnabled ? roundMoney(payable * (depositPercent / 100)) : 0
       const pmsOn = settings.kiosk_enabled === 'true'
       const bookingStatus = payEnabled && depositAmount > 0
         ? 'awaiting_payment'

@@ -24,6 +24,17 @@ test('full payment adds service charge then VAT on the combined amount', () => {
   assert.equal(out.total, 1177)
 })
 
+test('full payment keeps satang and does not ceil to whole baht', () => {
+  const out = applyStayCharges(999, {
+    collectFull: true,
+    serviceChargePercent: 10,
+    vatPercent: 7,
+  })
+  assert.equal(out.service_charge, 99.9)
+  assert.equal(out.vat, 76.92)
+  assert.equal(out.total, 1175.82)
+})
+
 test('sanitizePercentSetting clamps to 0–100', () => {
   assert.equal(sanitizePercentSetting('10'), '10')
   assert.equal(sanitizePercentSetting('150'), '100')

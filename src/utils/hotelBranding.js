@@ -7,6 +7,7 @@ const { getHotelSettings, setHotelSetting } = require('./hotelSettings')
 const KIND_SETTING = {
   logo: 'ui_logo_url',
   hero: 'ui_hero_image_url',
+  banner: 'ui_banner_image_url',
 }
 
 const MIME_BY_EXT = {
@@ -20,7 +21,8 @@ const MIME_BY_EXT = {
 function normalizeKind(kind) {
   const k = String(kind || '').trim().toLowerCase()
   if (k === 'login' || k === 'login_image') return 'hero'
-  if (k === 'logo' || k === 'hero') return k
+  if (k === 'cover' || k === 'search_banner' || k === 'page_banner') return 'banner'
+  if (k === 'logo' || k === 'hero' || k === 'banner') return k
   return ''
 }
 
@@ -52,7 +54,7 @@ async function listKindFiles(hotelId, kind) {
 
 async function saveUiImage(hotelId, kind, buffer, ext) {
   const safeKind = normalizeKind(kind)
-  if (!safeKind) throw new Error('kind ต้องเป็น logo หรือ hero')
+  if (!safeKind) throw new Error('kind ต้องเป็น logo, hero หรือ banner')
   const dir = hotelUiDir(hotelId)
   await fs.mkdir(dir, { recursive: true })
   const oldFiles = await listKindFiles(hotelId, safeKind)
@@ -84,10 +86,11 @@ async function readUiImage(hotelId, filename) {
 }
 
 async function getHotelBranding(pool, hotel) {
-  const map = await getHotelSettings(pool, hotel.id, ['ui_logo_url', 'ui_hero_image_url'])
+  const map = await getHotelSettings(pool, hotel.id, ['ui_logo_url', 'ui_hero_image_url', 'ui_banner_image_url'])
   return {
     logo_url: publicUiImagePath(hotel.slug, 'logo', map.ui_logo_url),
     login_image_url: publicUiImagePath(hotel.slug, 'hero', map.ui_hero_image_url),
+    banner_url: publicUiImagePath(hotel.slug, 'banner', map.ui_banner_image_url),
   }
 }
 
@@ -95,6 +98,7 @@ function applyHotelBranding(hotel, branding = {}) {
   if (!hotel) return hotel
   hotel.logo_url = branding.logo_url || ''
   hotel.login_image_url = branding.login_image_url || ''
+  hotel.banner_url = branding.banner_url || ''
   return hotel
 }
 
@@ -109,7 +113,7 @@ async function attachHotelsBranding(pool, hotels) {
     `SELECT hotel_id, setting_key, setting_value
      FROM hotel_settings
      WHERE hotel_id = ANY($1) AND setting_key = ANY($2)`,
-    [ids, ['ui_logo_url', 'ui_hero_image_url']]
+    [ids, ['ui_logo_url', 'ui_hero_image_url', 'ui_banner_image_url']]
   )
   const byHotel = {}
   for (const row of result.rows) {
@@ -121,6 +125,7 @@ async function attachHotelsBranding(pool, hotels) {
     applyHotelBranding(hotel, {
       logo_url: publicUiImagePath(hotel.slug, 'logo', map.ui_logo_url),
       login_image_url: publicUiImagePath(hotel.slug, 'hero', map.ui_hero_image_url),
+      banner_url: publicUiImagePath(hotel.slug, 'banner', map.ui_banner_image_url),
     })
   }
   return hotels
@@ -129,7 +134,7 @@ async function attachHotelsBranding(pool, hotels) {
 async function saveHotelUiImage(pool, hotel, kind, imageData, imageMime) {
   const safeKind = normalizeKind(kind)
   const key = settingKeyForKind(safeKind)
-  if (!key) return { error: 'kind ต้องเป็น logo หรือ hero', status: 400 }
+  if (!key) return { error: 'kind ต้องเป็น logo, hero หรือ banner', status: 400 }
   const parsed = parseBase64Image(imageData, imageMime)
   if (!parsed) return { error: 'imageData is required', status: 400 }
   if (parsed.error) return { error: parsed.error, status: 400 }
@@ -145,7 +150,7 @@ async function saveHotelUiImage(pool, hotel, kind, imageData, imageMime) {
 async function removeHotelUiImage(pool, hotel, kind) {
   const safeKind = normalizeKind(kind)
   const key = settingKeyForKind(safeKind)
-  if (!key) return { error: 'kind ต้องเป็น logo หรือ hero', status: 400 }
+  if (!key) return { error: 'kind ต้องเป็น logo, hero หรือ banner', status: 400 }
   await deleteUiImage(hotel.id, safeKind)
   await setHotelSetting(pool, hotel.id, key, '')
   return { kind: safeKind, url: '' }

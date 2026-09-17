@@ -6,7 +6,7 @@ const { getHotelSettings } = require('../utils/hotelSettings')
 const { resolveHotelFeatures } = require('../utils/hotelFeatureFlags')
 const { HOTEL_RETURN, shapeHotel, shapeHotelWithCatalog } = require('../utils/hotelShape')
 const { getHotelBookingPolicies, applyBookingPolicies } = require('../utils/bookingPolicies')
-const { attachHotelBranding, attachHotelsBranding, readUiImage, normalizeKind } = require('../utils/hotelBranding')
+const { attachHotelBranding, attachHotelsBranding, readUiImage, normalizeKind, settingKeyForKind } = require('../utils/hotelBranding')
 const { attachHotelTheme } = require('../utils/hotelTheme')
 const { getAvailableRoomTypes, cheapestRoomType, stayNightPrice } = require('../utils/availableRooms')
 const { getNetworkBranding, readNetworkUiImage } = require('../utils/networkBranding')
@@ -188,7 +188,7 @@ router.get('/:slug/catalog-options', async (req, res) => {
   }
 })
 
-// GET /api/hotels/:slug/ui-image/:kind — โลโก้ / รูปหน้าล็อกอิน
+// GET /api/hotels/:slug/ui-image/:kind — โลโก้ / รูปหน้าล็อกอิน / พื้นหลังหน้าจอง
 router.get('/:slug/ui-image/:kind', async (req, res) => {
   try {
     const pool = getPool()
@@ -199,7 +199,8 @@ router.get('/:slug/ui-image/:kind', async (req, res) => {
       [req.params.slug]
     )
     if (!hotelRow.rows[0]) return res.status(404).json({ error: 'Hotel not found' })
-    const settingKey = kind === 'logo' ? 'ui_logo_url' : 'ui_hero_image_url'
+    const settingKey = settingKeyForKind(kind)
+    if (!settingKey) return res.status(404).json({ error: 'Not found' })
     const settings = await getHotelSettings(pool, hotelRow.rows[0].id, [settingKey])
     const filename = String(settings[settingKey] || '').trim()
     if (!filename) return res.status(404).json({ error: 'Image not found' })

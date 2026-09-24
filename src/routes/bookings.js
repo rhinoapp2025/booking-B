@@ -353,8 +353,19 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       if (depositPercent > 100) depositPercent = 100
 
       const depositAmount = payEnabled ? roundMoney(payable * (depositPercent / 100)) : 0
+      const slipRequired = payEnabled && depositAmount > 0
+      let parsedSlip = null
+      if (slipRequired) {
+        parsedSlip = parseBase64Image(req.body.imageData, req.body.imageMime)
+        if (!req.body.imageData || parsedSlip?.error) {
+          throw Object.assign(
+            new Error(parsedSlip?.error || 'อัปโหลดสลิปก่อนจองเข้าระบบ'),
+            { status: 400 },
+          )
+        }
+      }
       const pmsOn = settings.kiosk_enabled === 'true'
-      const bookingStatus = payEnabled && depositAmount > 0
+      const bookingStatus = slipRequired
         ? 'awaiting_payment'
         : (pmsOn ? 'pending' : 'confirmed')
 
@@ -415,10 +426,23 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       })
       await applyGuestProfileDiff(client, req.user.id, profileDiff)
 
+      if (parsedSlip) {
+        const filename = await saveBookingPaymentSlip(newBooking.id, parsedSlip.buffer, parsedSlip.ext)
+        await client.query(
+          `INSERT INTO booking_payment_slips (booking_id, hotel_id, slip_filename, uploaded_by_user_id)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (booking_id) DO UPDATE SET slip_filename = $3, status = 'pending', updated_at = NOW()`,
+          [newBooking.id, hotel.id, filename, req.user.id]
+        )
+      }
+
       return newBooking
     })
 
     notifyAdminNewBookingChat(pool, hotel.id, booking.id).catch(() => null)
+    if (req.body.imageData) {
+      notifyAdminPaymentSlipChat(pool, hotel.id, booking.id).catch(() => null)
+    }
     emitBookingChanged(hotel.id, { type: 'created', booking_id: booking.id })
 
     let pms = null

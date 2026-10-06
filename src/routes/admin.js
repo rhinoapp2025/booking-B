@@ -561,7 +561,16 @@ router.delete('/:hotelSlug/bookings/:bookingId', requireHotelAdmin, async (req, 
     if (booking.pms_resv_no && booking.status !== 'cancelled') {
       pms = await maybeCancelBookingInPms(pool, hotel.id, req.params.bookingId)
       if (pms?.error) {
-        return res.status(502).json({ error: `ยกเลิกใน PMS ไม่สำเร็จ: ${pms.error}`, pms })
+        const pmsMissing = String(pms.error).includes('ไม่พบการจองใน PMS')
+        const bookengOnly = req.query.bookeng_only === '1'
+        if (!(bookengOnly && pmsMissing)) {
+          return res.status(502).json({
+            error: `ยกเลิกใน PMS ไม่สำเร็จ: ${pms.error}`,
+            pms_missing: pmsMissing,
+            pms,
+          })
+        }
+        pms = { skipped: true, missing: true }
       }
     }
 

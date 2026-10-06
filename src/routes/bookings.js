@@ -355,13 +355,10 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       const depositAmount = payEnabled ? roundMoney(payable * (depositPercent / 100)) : 0
       const slipRequired = payEnabled && depositAmount > 0
       let parsedSlip = null
-      if (slipRequired) {
+      if (req.body.imageData) {
         parsedSlip = parseBase64Image(req.body.imageData, req.body.imageMime)
-        if (!req.body.imageData || parsedSlip?.error) {
-          throw Object.assign(
-            new Error(parsedSlip?.error || 'อัปโหลดสลิปก่อนจองเข้าระบบ'),
-            { status: 400 },
-          )
+        if (parsedSlip?.error) {
+          throw Object.assign(new Error(parsedSlip.error), { status: 400 })
         }
       }
       const pmsOn = settings.kiosk_enabled === 'true'
@@ -447,7 +444,8 @@ router.post('/:hotelSlug', auth, async (req, res) => {
 
     let pms = null
     const kioskAfter = await getHotelSettings(pool, hotel.id, ['kiosk_enabled'])
-    if (kioskAfter.kiosk_enabled === 'true') {
+    const waitForSlip = booking.status === 'awaiting_payment' && !req.body.imageData
+    if (kioskAfter.kiosk_enabled === 'true' && !waitForSlip) {
       pms = await maybePushBookingToPms(pool, hotel.id, booking.id)
       if (pms?.newResvNo || pms?.sent) {
         const refreshed = await pool.query(`SELECT * FROM bookings WHERE id = $1 AND hotel_id = $2`, [booking.id, hotel.id])
@@ -543,7 +541,13 @@ router.post('/:hotelSlug/:bookingId/slip', auth, async (req, res) => {
     notifyAdminPaymentSlipChat(pool, hotel.id, req.params.bookingId).catch(() => null)
     emitBookingChanged(hotel.id, { type: 'slip_uploaded', booking_id: req.params.bookingId })
 
-    res.json({ ok: true, filename })
+    const kioskAfter = await getHotelSettings(pool, hotel.id, ['kiosk_enabled'])
+    let pms = null
+    if (kioskAfter.kiosk_enabled === 'true') {
+      pms = await maybePushBookingToPms(pool, hotel.id, req.params.bookingId)
+    }
+
+    res.json({ ok: true, filename, pms })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

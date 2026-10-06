@@ -59,7 +59,7 @@ router.get('/my', auth, async (req, res) => {
               b.status, b.total_price, b.deposit_amount, b.special_requests,
               b.created_at, b.updated_at, b.cancelled_reason,
               b.pms_ota_booking_no, b.pms_resv_no, b.pms_room_no, b.hotel_id,
-              b.include_breakfast, b.breakfast_count, b.rate_plan_id,
+              b.include_breakfast, b.breakfast_count, b.rate_plan_id, b.room_count,
               h.slug AS hotel_slug, h.name AS hotel_name,
               rp.name AS rate_plan_name,
               (SELECT EXISTS (SELECT 1 FROM reviews rv WHERE rv.booking_id = b.id)) AS has_review,
@@ -107,7 +107,7 @@ router.get('/:hotelSlug/my', auth, async (req, res) => {
               b.status, b.total_price, b.deposit_amount, b.special_requests,
               b.created_at, b.updated_at, b.cancelled_reason,
               b.pms_ota_booking_no, b.pms_resv_no, b.pms_room_no,
-              b.include_breakfast, b.breakfast_count, b.rate_plan_id,
+              b.include_breakfast, b.breakfast_count, b.rate_plan_id, b.room_count,
               rp.name AS rate_plan_name,
               (SELECT EXISTS (SELECT 1 FROM reviews rv WHERE rv.booking_id = b.id)) AS has_review,
               json_agg(json_build_object(
@@ -221,7 +221,9 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       const roomType = rtResult.rows[0]
 
       const { getChannelQuotes, quoteChannelStay, parseBreakfastChoice } = require('../utils/channelManager')
+      const { roomsNeededForParty } = require('../utils/availableRooms')
       const partySize = Math.max(1, Number(num_adults) + Number(num_children))
+      const roomCount = roomsNeededForParty(roomType.max_adults, num_adults, num_children)
       let breakfastChoice = parseBreakfastChoice(include_breakfast, breakfast_count, partySize)
 
       const kioskCfg = await getHotelSettings(client, hotel.id, [
@@ -247,20 +249,23 @@ router.post('/:hotelSlug', auth, async (req, res) => {
           }
         }
         if (Object.keys(sellableMap || {}).length) {
-          if (!Number.isFinite(sellable) || sellable <= 0) {
+          if (!Number.isFinite(sellable) || sellable < roomCount) {
             throw Object.assign(new Error('ไม่มีห้องว่างในช่วงวันที่เลือก'), { status: 409 })
           }
           const unpushed = await client.query(
-            `SELECT COUNT(DISTINCT b.id)::int AS n
-             FROM booking_rooms br
-             JOIN bookings b ON b.id = br.booking_id
-             WHERE b.hotel_id = $1 AND br.room_type_id = $2
-               AND ${ROOM_HOLD_STATUS_SQL}
-               AND b.check_in_date < $4 AND b.check_out_date > $3
-               AND NULLIF(TRIM(COALESCE(b.pms_resv_no, '')), '') IS NULL`,
+            `SELECT COALESCE(SUM(s.room_count), 0)::int AS n
+             FROM (
+               SELECT DISTINCT b.id, b.room_count
+               FROM booking_rooms br
+               JOIN bookings b ON b.id = br.booking_id
+               WHERE b.hotel_id = $1 AND br.room_type_id = $2
+                 AND ${ROOM_HOLD_STATUS_SQL}
+                 AND b.check_in_date < $4 AND b.check_out_date > $3
+                 AND NULLIF(TRIM(COALESCE(b.pms_resv_no, '')), '') IS NULL
+             ) s`,
             [hotel.id, room_type_id, check_in_date, check_out_date]
           )
-          if (unpushed.rows[0].n >= sellable) {
+          if (unpushed.rows[0].n + roomCount > sellable) {
             throw Object.assign(new Error('ไม่มีห้องว่างในช่วงวันที่เลือก'), { status: 409 })
           }
         }
@@ -281,12 +286,16 @@ router.post('/:hotelSlug', auth, async (req, res) => {
 
         const roomQuery = bookedIds.length > 0
           ? `SELECT id FROM rooms WHERE hotel_id = $1 AND room_type_id = $2 AND status = 'available'
-             AND id NOT IN (${bookedIds.map((_, i) => `$${i + 3}`).join(',')}) LIMIT 1 FOR UPDATE SKIP LOCKED`
-          : `SELECT id FROM rooms WHERE hotel_id = $1 AND room_type_id = $2 AND status = 'available' LIMIT 1 FOR UPDATE SKIP LOCKED`
+             AND id NOT IN (${bookedIds.map((_, i) => `$${i + 3}`).join(',')})
+             LIMIT $${bookedIds.length + 3} FOR UPDATE SKIP LOCKED`
+          : `SELECT id FROM rooms WHERE hotel_id = $1 AND room_type_id = $2 AND status = 'available'
+             LIMIT $3 FOR UPDATE SKIP LOCKED`
 
-        const roomResult = await client.query(roomQuery, [hotel.id, room_type_id, ...bookedIds])
-        if (!roomResult.rows[0]) throw Object.assign(new Error('ไม่มีห้องว่างในช่วงวันที่เลือก'), { status: 409 })
-        roomId = roomResult.rows[0].id
+        const roomResult = await client.query(roomQuery, [hotel.id, room_type_id, ...bookedIds, roomCount])
+        if (roomResult.rows.length < roomCount) {
+          throw Object.assign(new Error('ไม่มีห้องว่างในช่วงวันที่เลือก'), { status: 409 })
+        }
+        roomId = roomResult.rows.map((row) => row.id)
       }
 
       let pricePerNight = 0
@@ -333,7 +342,8 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       const abfTotal = breakfastChoice.includeBreakfast
         ? abfPerPerson * breakfastChoice.breakfastCount * nights
         : 0
-      const subtotal = channelQuote.total
+      const roomStay = channelQuote.room_total * roomCount
+      const subtotal = roomStay + abfTotal
 
       const payEnabled = await isHotelFeatureEnabled(client, hotel.id, 'feat_payment_slip')
       const settings = await getHotelSettings(client, hotel.id, [
@@ -378,8 +388,8 @@ router.post('/:hotelSlug', auth, async (req, res) => {
             guest_title, guest_first_name, guest_last_name, guest_sex, guest_nation,
             guest_national_id, guest_passport, guest_birthday, guest_car_no,
             guest_address1, guest_address2, guest_address3,
-            include_breakfast, breakfast_count, rate_plan_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+            include_breakfast, breakfast_count, rate_plan_id, room_count)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
          RETURNING *`,
         [
           hotel.id, req.user.id, check_in_date, check_out_date,
@@ -394,16 +404,23 @@ router.post('/:hotelSlug', auth, async (req, res) => {
           breakfastChoice.includeBreakfast,
           breakfastChoice.breakfastCount,
           chosenRatePlanId,
+          roomCount,
         ]
       )
       const newBooking = bResult.rows[0]
 
-      // สร้าง booking_rooms
-      await client.query(
-        `INSERT INTO booking_rooms (booking_id, room_id, room_type_id, price_per_night, nights, subtotal)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [newBooking.id, roomId, room_type_id, pricePerNight, nights, subtotal]
-      )
+      const heldRoomIds = Array.isArray(roomId) ? roomId : [null]
+      const oneRoomStay = channelQuote.room_total
+      for (let i = 0; i < heldRoomIds.length; i++) {
+        const lineSubtotal = i === 0
+          ? oneRoomStay * (heldRoomIds.length === 1 ? roomCount : 1) + abfTotal
+          : oneRoomStay
+        await client.query(
+          `INSERT INTO booking_rooms (booking_id, room_id, room_type_id, price_per_night, nights, subtotal)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [newBooking.id, heldRoomIds[i], room_type_id, pricePerNight, nights, lineSubtotal]
+        )
+      }
 
       // อัปเดตโปรไฟล์ผู้ใช้จากฟอร์มจอง (เฉพาะฟิลด์ว่างหรือต่างจากเดิม)
       const userRow = await client.query(

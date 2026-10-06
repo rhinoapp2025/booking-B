@@ -351,6 +351,7 @@ async function ensureSchema() {
   await pool.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS pms_ota_booking_no TEXT`)
   await pool.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS include_breakfast BOOLEAN NOT NULL DEFAULT false`)
   await pool.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS breakfast_count SMALLINT NOT NULL DEFAULT 0`)
+  await pool.query(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS room_count SMALLINT NOT NULL DEFAULT 1`)
 
   // ── booking_rooms (rooms assigned to a booking) ────────────────────────────
   await pool.query(`

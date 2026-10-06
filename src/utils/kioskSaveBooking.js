@@ -162,9 +162,10 @@ async function saveKioskBookingToPms({ settings, payload, assignRoom = true }) {
     const birthday = asDate(payload.Birthday)
     const resvName = `${payload.GstFName || ''} ${payload.GstLName || ''}`.trim()
 
+    const roomsToBook = Math.max(1, parseInt(payload.RoomCount, 10) || 1)
     for (let i = 1; i <= adultCount; i++) {
       const gstNo = i
-      const roomCount = i === 1 ? 1 : 0
+      const roomCount = i === 1 ? roomsToBook : 0
       const request = new sql.Request(transaction)
       request
         .input('RecState', sql.Int, 1)
@@ -386,6 +387,7 @@ async function pushBookingToPms(pg, hotelId, bookingId) {
     RoomType: row.room_type_name,
     RoomNo: '',
     RoomRateAmt: roomRateAmt,
+    RoomCount: Math.max(1, Number(row.room_count) || 1),
     AbfAdult: abfAdult,
     AbfAmt: abfAmt,
     GstTitle: row.guest_title,

@@ -23,7 +23,7 @@ const { attachHotelTheme } = require('../utils/hotelTheme')
 const { ROOM_HOLD_STATUS_SQL } = require('../utils/availableRooms')
 const { notifyAdminNewBookingChat } = require('../utils/bookingChatNotify')
 const {
-  maybePushBookingToPms, pushBookingToPms, maybeSyncPmsStatuses, maybeCancelBookingInPms,
+  maybePushBookingToPms, pushBookingToPms, maybePostSlipDepositToPms, maybeSyncPmsStatuses, maybeCancelBookingInPms,
 } = require('../utils/kioskSaveBooking')
 
 function clipText(value, max) {
@@ -499,6 +499,9 @@ router.patch('/:hotelSlug/bookings/:bookingId/slip', requireHotelAdmin, async (r
         [req.params.bookingId, hotel.id]
       )
       pms = await maybePushBookingToPms(pool, hotel.id, req.params.bookingId)
+      if (pms?.newResvNo && !pms.error) {
+        pms.deposit = await maybePostSlipDepositToPms(pool, hotel.id, req.params.bookingId)
+      }
       emitBookingChanged(hotel.id, { type: 'slip_approved', booking_id: req.params.bookingId })
     }
 

@@ -698,6 +698,108 @@ async function cancelBookingInPms(pg, hotelId, bookingId) {
   }
 }
 
+function depositRefLabel(totalPrice, depositAmount) {
+  const total = Number(totalPrice) || 0
+  const due = Number(depositAmount) || 0
+  if (total > 0 && due + 0.001 >= total) return 'ชำระเต็มจำนวน'
+  const pct = total > 0 ? Math.round((due / total) * 100) : 0
+  return clip(`มัดจำ ${pct}%`, 16)
+}
+
+function formatCiDate(value) {
+  const day = ymd(value)
+  if (!day) return ''
+  const [y, m, d] = day.split('-')
+  return `${d}/${m}/${y}`
+}
+
+/** หลังจองเข้า PMS แล้ว โพสต์มัดจำ/ยอดชำระผ่าน sp_postdeposit */
+async function postSlipDepositToPms(pg, hotelId, bookingId) {
+  const settings = await getHotelSettings(pg, hotelId, [
+    'kiosk_enabled', 'kiosk_db_name', 'kiosk_hotel_id', 'kiosk_login_id',
+  ])
+  if (settings.kiosk_enabled !== 'true') return { skipped: true }
+  if (!settings.kiosk_db_name || !settings.kiosk_hotel_id) {
+    throw new Error('ยังตั้งค่า PMS ไม่ครบ')
+  }
+
+  const bookingResult = await pg.query(
+    `SELECT id, deposit_amount, total_price, pms_resv_no, check_in_date,
+            guest_name, guest_title, guest_first_name, guest_last_name
+     FROM bookings
+     WHERE id = $1 AND hotel_id = $2`,
+    [bookingId, hotelId]
+  )
+  const row = bookingResult.rows[0]
+  if (!row) throw new Error('ไม่พบการจอง')
+  const resvNo = parseInt(row.pms_resv_no, 10)
+  if (!Number.isInteger(resvNo) || resvNo <= 0) {
+    throw new Error('ยังไม่มีเลขจอง PMS จึงโพสต์มัดจำไม่ได้')
+  }
+  const amt = Number(row.deposit_amount) || 0
+  if (amt <= 0) return { skipped: true, reason: 'no_amount' }
+
+  const hotelIdInt = parseInt(settings.kiosk_hotel_id, 10)
+  if (!Number.isInteger(hotelIdInt)) throw new Error('Hotel ID ของ PMS ไม่ถูกต้อง')
+
+  const gstName = clip(
+    row.guest_name || [row.guest_title, row.guest_first_name, row.guest_last_name].filter(Boolean).join(' '),
+    76,
+  )
+  const ref = depositRefLabel(row.total_price, row.deposit_amount)
+  const pool = await connectDynamicDB(settings.kiosk_db_name)
+  try {
+    const codeResult = await pool.request().query(`
+      SELECT TOP 1 LTRIM(RTRIM(CAST(QRCode AS varchar(20)))) AS QRCode
+      FROM TrnCodeConfig
+      WHERE NULLIF(LTRIM(RTRIM(CAST(QRCode AS varchar(20)))), '') IS NOT NULL
+    `)
+    const trnCode = clip(codeResult.recordset?.[0]?.QRCode, 5)
+    if (!trnCode) throw new Error('ไม่พบ QRCode ใน TrnCodeConfig')
+
+    const result = await pool.request()
+      .input('roomno', sql.VarChar(7), 'DS')
+      .input('amt', sql.Float, amt)
+      .input('bussdate', sql.DateTime, asDate(new Date()))
+      .input('userid', sql.VarChar(20), clip(settings.kiosk_login_id, 20))
+      .input('shiftno', sql.SmallInt, 1)
+      .input('ref', sql.VarChar(16), ref)
+      .input('TrnCode', sql.VarChar(5), trnCode)
+      .input('gstName', sql.VarChar(76), gstName)
+      .input('CIDate', sql.VarChar(16), formatCiDate(row.check_in_date))
+      .output('id', sql.Int, 1)
+      .input('ResvNo', sql.Int, resvNo)
+      .input('MemberId', sql.VarChar(20), '')
+      .input('CurrencyCode', sql.VarChar(5), 'THB')
+      .input('CurrencyRate', sql.Float, 1)
+      .input('CurrencyAmt', sql.Float, amt)
+      .input('VoucherNo', sql.VarChar(24), '')
+      .input('AgentCode', sql.VarChar(16), '')
+      .input('HotelId', sql.Int, hotelIdInt)
+      .execute('sp_postdeposit')
+
+    return {
+      skipped: false,
+      sent: true,
+      journalId: result.output?.id ?? null,
+      trnCode,
+      ref,
+      amount: amt,
+    }
+  } finally {
+    try { await pool.close() } catch { /* ignore */ }
+  }
+}
+
+async function maybePostSlipDepositToPms(pg, hotelId, bookingId) {
+  try {
+    return await postSlipDepositToPms(pg, hotelId, bookingId)
+  } catch (err) {
+    console.error('[pms] post deposit failed:', err.message)
+    return { skipped: false, sent: false, error: err.message }
+  }
+}
+
 async function maybeCancelBookingInPms(pg, hotelId, bookingId) {
   try {
     const result = await cancelBookingInPms(pg, hotelId, bookingId)
@@ -716,6 +818,8 @@ async function maybeCancelBookingInPms(pg, hotelId, bookingId) {
 module.exports = {
   pushBookingToPms,
   maybePushBookingToPms,
+  postSlipDepositToPms,
+  maybePostSlipDepositToPms,
   cancelBookingInPms,
   maybeCancelBookingInPms,
   cancelReservationInPms,

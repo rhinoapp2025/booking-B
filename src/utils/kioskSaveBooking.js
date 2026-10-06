@@ -122,6 +122,7 @@ async function appendResvGroup(transaction, {
   arrivalDate, deptDate, birthday, resvName, groupName,
   payload, defaultOptions, loginID, hotelID, roomNo,
 }) {
+  const isHeader = gstNo === 0
   const request = new sql.Request(transaction)
   request
     .input('RecState', sql.Int, 1)
@@ -129,9 +130,9 @@ async function appendResvGroup(transaction, {
     .input('GstNo', sql.Int, gstNo)
     .input('ResvDate', sql.DateTime, resvDate)
     .input('GroupName', sql.VarChar(30), clip(groupName, 30))
-    .input('GstFName', sql.VarChar(30), clip(payload.GstFName, 30))
-    .input('GstLName', sql.VarChar(30), clip(payload.GstLName, 30))
-    .input('GStTitle', sql.VarChar(16), clip(payload.GstTitle, 16))
+    .input('GstFName', sql.VarChar(30), isHeader ? clip(groupName, 30) : clip(payload.GstFName, 30))
+    .input('GstLName', sql.VarChar(30), isHeader ? '' : clip(payload.GstLName, 30))
+    .input('GStTitle', sql.VarChar(16), isHeader ? '' : clip(payload.GstTitle, 16))
     .input('AgentName', sql.VarChar(10), 'BookEng')
     .input('BusSource', sql.VarChar(5), 'OTA')
     .input('GstType', sql.VarChar(3), 'OTA')
@@ -139,10 +140,10 @@ async function appendResvGroup(transaction, {
     .input('MarketSeg', sql.VarChar(5), 'OTA')
     .input('Resv_By', sql.VarChar(3), ' ')
     .input('Resv_Sts', sql.VarChar(3), 'CFM')
-    .input('RmType', sql.VarChar(5), clip(payload.RoomType, 5))
-    .input('RmNo', sql.VarChar(7), roomNo || '')
+    .input('RmType', sql.VarChar(5), isHeader ? '' : clip(payload.RoomType, 5))
+    .input('RmNo', sql.VarChar(7), isHeader ? '' : (roomNo || ''))
     .input('RoomRateCode', sql.VarChar(7), ' ')
-    .input('RoomRateAmt', sql.Float, Number(payload.RoomRateAmt) || 0)
+    .input('RoomRateAmt', sql.Float, isHeader ? 0 : (Number(payload.RoomRateAmt) || 0))
     .input('Rooms', sql.Int, rooms)
     .input('Nights', sql.Int, Number(payload.nights) || 0)
     .input('Adult', sql.Int, Math.max(1, parseInt(payload.GstAdult, 10) || 1))
@@ -163,18 +164,17 @@ async function appendResvGroup(transaction, {
     .input('Reference', sql.VarChar(40), '')
     .input('Approve', sql.VarChar(10), ' ')
     .input('CardExpire', sql.DateTime, null)
-    // SP ใส่ @Comp ลง GstHistory และ @History ลง Complimentary
     .input('History', sql.VarChar(1), 'N')
-    .input('Comp', sql.VarChar(1), 'Y')
+    .input('Comp', sql.VarChar(1), 'N')
     .input('Memo1', sql.VarChar(255), clip(payload.Memo1, 255))
     .input('Memo2', sql.VarChar(255), '')
     .input('User', sql.VarChar(20), clip(loginID, 20))
     .input('Date', sql.DateTime, new Date())
     .input('ResvName', sql.VarChar(48), clip(resvName, 48))
-    .input('GstNation', sql.VarChar(3), clip(payload.GstNation, 3))
+    .input('GstNation', sql.VarChar(3), isHeader ? '' : clip(payload.GstNation, 3))
     .input('yyyyBirthday', sql.VarChar(4), ' ')
-    .input('Sex', sql.VarChar(8), clip(payload.Sex, 8))
-    .input('Passportno', sql.VarChar(30), clip(payload.GstPassPortNo, 30))
+    .input('Sex', sql.VarChar(8), isHeader ? '' : clip(payload.Sex, 8))
+    .input('Passportno', sql.VarChar(30), isHeader ? '' : clip(payload.GstPassPortNo, 30))
     .input('Visa', sql.VarChar(32), ' ')
     .input('visaBgDate', sql.DateTime, null)
     .input('visaenddate', sql.DateTime, null)
@@ -183,7 +183,7 @@ async function appendResvGroup(transaction, {
     .input('add1', sql.VarChar(64), '')
     .input('add2', sql.VarChar(64), '')
     .input('add3', sql.VarChar(64), '')
-    .input('abfamt', sql.Float, Number(payload.AbfAmt) || 0)
+    .input('abfamt', sql.Float, isHeader ? 0 : (Number(payload.AbfAmt) || 0))
     .input('extrabed', sql.Float, 0)
     .input('TelNo', sql.VarChar(24), clip(payload.TelNo, 24))
     .input('Company', sql.VarChar(100), '')
@@ -199,7 +199,7 @@ async function appendResvGroup(transaction, {
     .input('Birthday', sql.DateTime, birthday)
     .input('NationCardID', sql.VarChar(16), clip(payload.NationCardId, 16))
     .input('HotelId', sql.Int, parseInt(hotelID, 10))
-    .input('AbfAdult', sql.Int, Number(payload.AbfAdult) || 0)
+    .input('AbfAdult', sql.Int, isHeader ? 0 : (Number(payload.AbfAdult) || 0))
     .input('ExtraBedCount', sql.Int, 0)
     .input('ExtraBedAbfAmt', sql.Float, 0)
     .input('Email', sql.VarChar(64), clip(payload.Email, 64))
@@ -236,7 +236,7 @@ async function saveKioskBookingToPms({ settings, payload, assignRoom = true }) {
     await transaction.begin()
 
     const defaultOptionResult = await new sql.Request(transaction).query(`
-      SELECT TOP 1 GstTypeDef, GstLevelDef, BusSourceDef, MarketDef, Def_TimeCheckOut
+      SELECT TOP 1 GstTypeDef, GstLevelDef, BusSourceDef, MarketDef, Def_TimeCheckIn, Def_TimeCheckOut
       FROM FRONT_OPTION
     `)
     const defaultOptions = defaultOptionResult.recordset[0] || {}
@@ -258,16 +258,19 @@ async function saveKioskBookingToPms({ settings, payload, assignRoom = true }) {
 
     const roomsToBook = Math.max(1, parseInt(payload.RoomCount, 10) || 1)
     const groupName = resvName || clip(payload.RoomType, 30)
-    for (let i = 1; i <= adultCount; i++) {
-      const gstNo = i
-      const roomCount = i === 1 ? roomsToBook : 0
-      if (roomsToBook > 1) {
+    if (roomsToBook > 1) {
+      const groupArrival = parseTimeString(defaultOptions.Def_TimeCheckIn) || arrivalTimeParam
+      const perRoom = Math.max(1, Math.ceil(adultCount / roomsToBook))
+      for (let gstNo = 0; gstNo <= adultCount; gstNo++) {
+        const rooms = gstNo === 0
+          ? roomsToBook
+          : ((gstNo - 1) % perRoom === 0 ? 1 : 0)
         await appendResvGroup(transaction, {
           resvNo: newResvNo,
           gstNo,
-          rooms: roomCount,
+          rooms,
           resvDate,
-          arrivalTimeParam,
+          arrivalTimeParam: groupArrival,
           deptTimeParam,
           arrivalDate,
           deptDate,
@@ -280,8 +283,16 @@ async function saveKioskBookingToPms({ settings, payload, assignRoom = true }) {
           hotelID,
           roomNo: assignedRoomNo,
         })
-        continue
       }
+      await new sql.Request(transaction)
+        .input('HotelId', sql.Int, parseInt(hotelID, 10))
+        .input('RecSts', sql.SmallInt, 1)
+        .input('ResvNo', sql.Int, newResvNo)
+        .execute('Sp_ResvGroupUpdateCM')
+    }
+    for (let i = 1; roomsToBook <= 1 && i <= adultCount; i++) {
+      const gstNo = i
+      const roomCount = i === 1 ? roomsToBook : 0
       const request = new sql.Request(transaction)
       request
         .input('RecState', sql.Int, 1)

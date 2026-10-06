@@ -1,5 +1,6 @@
 /**
- * ส่งการจองไป PMS เทียบ /api/kiosksavebooking (Sp_ReservationAppend)
+ * ส่งการจองไป PMS เทียบ /api/kiosksavebooking
+ * 1 ห้องใช้ Sp_ReservationAppend, มากกว่า 1 ห้องใช้ Sp_ResvGroupAppend
  */
 const { sql, connectDynamicDB } = require('../db/mssql')
 const { getHotelSettings } = require('./hotelSettings')
@@ -116,6 +117,99 @@ async function readOtaBookingNo({ dbName, resvNo, fallback }) {
   return clip(fallback, 20) || ''
 }
 
+async function appendResvGroup(transaction, {
+  resvNo, gstNo, rooms, resvDate, arrivalTimeParam, deptTimeParam,
+  arrivalDate, deptDate, birthday, resvName, groupName,
+  payload, defaultOptions, loginID, hotelID, roomNo,
+}) {
+  const request = new sql.Request(transaction)
+  request
+    .input('RecState', sql.Int, 1)
+    .input('ResvGrpNo', sql.Int, resvNo)
+    .input('GstNo', sql.Int, gstNo)
+    .input('ResvDate', sql.DateTime, resvDate)
+    .input('GroupName', sql.VarChar(30), clip(groupName, 30))
+    .input('GstFName', sql.VarChar(30), clip(payload.GstFName, 30))
+    .input('GstLName', sql.VarChar(30), clip(payload.GstLName, 30))
+    .input('GStTitle', sql.VarChar(16), clip(payload.GstTitle, 16))
+    .input('AgentName', sql.VarChar(10), 'BookEng')
+    .input('BusSource', sql.VarChar(5), 'OTA')
+    .input('GstType', sql.VarChar(3), 'OTA')
+    .input('GstLevel', sql.VarChar(3), defaultOptions.GstLevelDef || '')
+    .input('MarketSeg', sql.VarChar(5), 'OTA')
+    .input('Resv_By', sql.VarChar(3), ' ')
+    .input('Resv_Sts', sql.VarChar(3), 'CFM')
+    .input('RmType', sql.VarChar(5), clip(payload.RoomType, 5))
+    .input('RmNo', sql.VarChar(7), roomNo || '')
+    .input('RoomRateCode', sql.VarChar(7), ' ')
+    .input('RoomRateAmt', sql.Float, Number(payload.RoomRateAmt) || 0)
+    .input('Rooms', sql.Int, rooms)
+    .input('Nights', sql.Int, Number(payload.nights) || 0)
+    .input('Adult', sql.Int, Math.max(1, parseInt(payload.GstAdult, 10) || 1))
+    .input('Children', sql.Int, Number(payload.GstChildren) || 0)
+    .input('ArrivalDate', sql.DateTime, arrivalDate)
+    .input('ArrivalTime', sql.DateTime, arrivalTimeParam)
+    .input('ArrivalBy', sql.VarChar(2), ' ')
+    .input('ArrivalFlight', sql.VarChar(10), ' ')
+    .input('ArrivalServ', sql.VarChar(3), ' ')
+    .input('DeptDate', sql.DateTime, deptDate)
+    .input('DeptTime', sql.DateTime, deptTimeParam)
+    .input('DeptBy', sql.VarChar(2), ' ')
+    .input('DeptFlight', sql.VarChar(10), ' ')
+    .input('DeptServ', sql.VarChar(3), ' ')
+    .input('Deposit', sql.Float, 0)
+    .input('Payment', sql.VarChar(5), '')
+    .input('Cr_Limit', sql.Float, 0)
+    .input('Reference', sql.VarChar(40), '')
+    .input('Approve', sql.VarChar(10), ' ')
+    .input('CardExpire', sql.DateTime, null)
+    // SP ใส่ @Comp ลง GstHistory และ @History ลง Complimentary
+    .input('History', sql.VarChar(1), 'N')
+    .input('Comp', sql.VarChar(1), 'Y')
+    .input('Memo1', sql.VarChar(255), clip(payload.Memo1, 255))
+    .input('Memo2', sql.VarChar(255), '')
+    .input('User', sql.VarChar(20), clip(loginID, 20))
+    .input('Date', sql.DateTime, new Date())
+    .input('ResvName', sql.VarChar(48), clip(resvName, 48))
+    .input('GstNation', sql.VarChar(3), clip(payload.GstNation, 3))
+    .input('yyyyBirthday', sql.VarChar(4), ' ')
+    .input('Sex', sql.VarChar(8), clip(payload.Sex, 8))
+    .input('Passportno', sql.VarChar(30), clip(payload.GstPassPortNo, 30))
+    .input('Visa', sql.VarChar(32), ' ')
+    .input('visaBgDate', sql.DateTime, null)
+    .input('visaenddate', sql.DateTime, null)
+    .input('tmno', sql.VarChar(32), ' ')
+    .input('PointOfEntry', sql.VarChar(10), ' ')
+    .input('add1', sql.VarChar(64), '')
+    .input('add2', sql.VarChar(64), '')
+    .input('add3', sql.VarChar(64), '')
+    .input('abfamt', sql.Float, Number(payload.AbfAmt) || 0)
+    .input('extrabed', sql.Float, 0)
+    .input('TelNo', sql.VarChar(24), clip(payload.TelNo, 24))
+    .input('Company', sql.VarChar(100), '')
+    .input('Chargeto', sql.VarChar(32), 'A/C Guest')
+    .input('RegistNo', sql.VarChar(10), ' ')
+    .input('SaleID', sql.VarChar(20), ' ')
+    .input('TaxId', sql.VarChar(32), '')
+    .input('VoucherNo', sql.VarChar(16), '')
+    .input('DepositKeyAmt', sql.Float, 0)
+    .input('Homeadd1', sql.VarChar(64), clip(payload.HomeAddress1, 60))
+    .input('Homeadd2', sql.VarChar(64), clip(payload.HomeAddress2, 60))
+    .input('Homeadd3', sql.VarChar(64), clip(payload.HomeAddress3, 60))
+    .input('Birthday', sql.DateTime, birthday)
+    .input('NationCardID', sql.VarChar(16), clip(payload.NationCardId, 16))
+    .input('HotelId', sql.Int, parseInt(hotelID, 10))
+    .input('AbfAdult', sql.Int, Number(payload.AbfAdult) || 0)
+    .input('ExtraBedCount', sql.Int, 0)
+    .input('ExtraBedAbfAmt', sql.Float, 0)
+    .input('Email', sql.VarChar(64), clip(payload.Email, 64))
+    .input('CarId', sql.VarChar(16), clip(payload.CarNo, 16))
+    .input('FileImage', sql.VarChar(50), '')
+    .input('OTABookingNo', sql.VarChar(20), clip(payload.OTABookingNo, 20))
+
+  await request.execute('Sp_ResvGroupAppend')
+}
+
 async function saveKioskBookingToPms({ settings, payload, assignRoom = true }) {
   const dbName  = settings.kiosk_db_name
   const hotelID = settings.kiosk_hotel_id
@@ -163,9 +257,31 @@ async function saveKioskBookingToPms({ settings, payload, assignRoom = true }) {
     const resvName = `${payload.GstFName || ''} ${payload.GstLName || ''}`.trim()
 
     const roomsToBook = Math.max(1, parseInt(payload.RoomCount, 10) || 1)
+    const groupName = resvName || clip(payload.RoomType, 30)
     for (let i = 1; i <= adultCount; i++) {
       const gstNo = i
       const roomCount = i === 1 ? roomsToBook : 0
+      if (roomsToBook > 1) {
+        await appendResvGroup(transaction, {
+          resvNo: newResvNo,
+          gstNo,
+          rooms: roomCount,
+          resvDate,
+          arrivalTimeParam,
+          deptTimeParam,
+          arrivalDate,
+          deptDate,
+          birthday,
+          resvName,
+          groupName,
+          payload,
+          defaultOptions,
+          loginID,
+          hotelID,
+          roomNo: assignedRoomNo,
+        })
+        continue
+      }
       const request = new sql.Request(transaction)
       request
         .input('RecState', sql.Int, 1)

@@ -56,6 +56,7 @@ router.get('/search', async (req, res) => {
     const checkOut = req.query.checkOut || req.query.check_out
     const adults   = Math.max(1, parseInt(req.query.adults, 10) || 1)
     const children = Math.max(0, parseInt(req.query.children, 10) || 0)
+    const rooms    = Math.max(0, parseInt(req.query.rooms, 10) || 0)
 
     if (!checkIn || !checkOut) {
       return res.status(400).json({ error: 'กรุณาเลือกวันเช็คอินและเช็คเอาต์' })
@@ -96,7 +97,7 @@ router.get('/search', async (req, res) => {
       let types = []
       try {
         const found = await getAvailableRoomTypes(pool, hotel.id, {
-          checkIn, checkOut, adults, children,
+          checkIn, checkOut, adults, children, rooms: rooms || undefined,
           hotelSlug: hotel.slug,
         })
         types = found.types || []
@@ -389,6 +390,7 @@ router.get('/:slug/available-rooms', async (req, res) => {
     const checkOut = req.query.checkOut || req.query.check_out
     const adults   = req.query.adults   ?? 1
     const children = req.query.children ?? 0
+    const rooms    = req.query.rooms
 
     if (!checkIn || !checkOut) {
       return res.status(400).json({ error: 'checkIn and checkOut are required' })
@@ -408,6 +410,7 @@ router.get('/:slug/available-rooms', async (req, res) => {
 
     const { types } = await getAvailableRoomTypes(pool, hotelId, {
       checkIn, checkOut, adults: adultsN, children: childrenN,
+      rooms: Number(rooms) || undefined,
       hotelSlug: req.params.slug,
     })
 

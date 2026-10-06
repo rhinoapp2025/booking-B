@@ -114,14 +114,15 @@ router.put('/allotments', async (req, res) => {
 
 router.put('/rates', async (req, res) => {
   await withHotel(req, res, async (pool, hotel) => {
-    const { room_type_id, rate_plan_id, date_from, date_to, weekdays, price, abf } = req.body || {}
+    const { room_type_id, rate_plan_id, date_from, date_to, weekdays, price, abf, extrabed } = req.body || {}
     if (!room_type_id || !rate_plan_id) {
       return res.status(400).json({ error: 'เลือกประเภทห้องและเรทแพลน' })
     }
     const hasPrice = Object.prototype.hasOwnProperty.call(req.body || {}, 'price')
     const hasAbf = Object.prototype.hasOwnProperty.call(req.body || {}, 'abf')
-    if (!hasPrice && !hasAbf) {
-      return res.status(400).json({ error: 'ระบุราคาห้องหรือราคาอาหารเช้า' })
+    const hasExtrabed = Object.prototype.hasOwnProperty.call(req.body || {}, 'extrabed')
+    if (!hasPrice && !hasAbf && !hasExtrabed) {
+      return res.status(400).json({ error: 'ระบุราคาห้อง อาหารเช้า หรือ extrabed' })
     }
     const dates = datesForBulk(date_from, date_to, weekdays)
     let result = { updated: 0 }
@@ -130,6 +131,9 @@ router.put('/rates', async (req, res) => {
     }
     if (hasAbf) {
       result = await upsertRateColumn(pool, hotel.id, room_type_id, rate_plan_id, dates, 'abf', abf)
+    }
+    if (hasExtrabed) {
+      result = await upsertRateColumn(pool, hotel.id, room_type_id, rate_plan_id, dates, 'extrabed', extrabed)
     }
     res.json(result)
   })

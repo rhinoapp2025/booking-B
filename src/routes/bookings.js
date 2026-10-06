@@ -221,9 +221,9 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       const roomType = rtResult.rows[0]
 
       const { getChannelQuotes, quoteChannelStay, parseBreakfastChoice } = require('../utils/channelManager')
-      const { roomsNeededForParty } = require('../utils/availableRooms')
+      const requestedRooms = parseInt(req.body.room_count, 10)
+      const roomCount = Number.isFinite(requestedRooms) && requestedRooms > 0 ? requestedRooms : 1
       const partySize = Math.max(1, Number(num_adults) + Number(num_children))
-      const roomCount = roomsNeededForParty(roomType.max_adults, num_adults, num_children)
       let breakfastChoice = parseBreakfastChoice(include_breakfast, breakfast_count, partySize)
 
       const kioskCfg = await getHotelSettings(client, hotel.id, [
@@ -317,6 +317,11 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       if (!pickedPlan) {
         throw Object.assign(new Error('เรทแพลนนี้ใช้ไม่ได้ในช่วงวันที่เลือก'), { status: 400 })
       }
+      const { extraBedsForStay } = require('../utils/availableRooms')
+      const extraBeds = extraBedsForStay(roomType.max_adults, num_adults, num_children, roomCount)
+      if (extraBeds > 0 && !pickedPlan.extrabed_priced) {
+        throw Object.assign(new Error('เรทแพลนนี้ยังไม่ได้ตั้งราคา extrabed'), { status: 409 })
+      }
       breakfastChoice = parseBreakfastChoice(pickedPlan.includes_breakfast, breakfast_count, partySize)
 
       const channelQuote = await quoteChannelStay(client, hotel.id, room_type_id, check_in_date, check_out_date, {
@@ -342,8 +347,11 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       const abfTotal = breakfastChoice.includeBreakfast
         ? abfPerPerson * breakfastChoice.breakfastCount * nights
         : 0
+      const extraBedTotal = extraBeds > 0 && channelQuote.includes_extrabed
+        ? (Number(channelQuote.extrabedAvg) || 0) * extraBeds * nights
+        : 0
       const roomStay = channelQuote.room_total * roomCount
-      const subtotal = roomStay + abfTotal
+      const subtotal = roomStay + abfTotal + extraBedTotal
 
       const payEnabled = await isHotelFeatureEnabled(client, hotel.id, 'feat_payment_slip')
       const settings = await getHotelSettings(client, hotel.id, [

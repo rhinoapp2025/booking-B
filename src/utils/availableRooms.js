@@ -8,8 +8,23 @@ function roomsNeededForParty(maxPeople, adults, children) {
   return Math.ceil(party / max)
 }
 
-function typeFitsParty(type, adults, children) {
-  const needed = roomsNeededForParty(type.max_adults, adults, children)
+function stayRooms(_maxPeople, _adults, _children, requestedRooms) {
+  const requested = Number(requestedRooms)
+  if (Number.isFinite(requested) && requested >= 1) return requested
+  return 1
+}
+
+function extraBedsForStay(maxPeople, adults, children, rooms) {
+  const party = Math.max(0, Number(adults) || 0) + Math.max(0, Number(children) || 0)
+  const max = Number(maxPeople)
+  const roomN = Math.max(1, Number(rooms) || 1)
+  if (!Number.isFinite(max) || max <= 0) return 0
+  return Math.max(0, party - roomN * max)
+}
+
+function typeFitsParty(type, adults, children, requestedRooms) {
+  const needed = stayRooms(type.max_adults, adults, children, requestedRooms)
+  if (!needed) return false
   const available = Number(type.available_count)
   if (!Number.isFinite(available) || available <= 0) return false
   return available >= needed
@@ -46,7 +61,7 @@ function shapeTypeImages(rt, slug) {
   }
 }
 
-async function typesFromPmsSellable(pool, hotelId, sellableByType, kioskRooms, adults, children, hotelSlug) {
+async function typesFromPmsSellable(pool, hotelId, sellableByType, kioskRooms, adults, children, hotelSlug, requestedRooms) {
   const sellable = {}
   for (const [name, count] of Object.entries(sellableByType || {})) {
     const key = normTypeName(name)
@@ -72,8 +87,8 @@ async function typesFromPmsSellable(pool, hotelId, sellableByType, kioskRooms, a
   const types = []
   for (const rt of pgTypes.rows) {
     const n = Number(sellable[normTypeName(rt.name)])
-    const roomsNeeded = roomsNeededForParty(rt.max_adults, adults, children)
-    if (!Number.isFinite(n) || n < roomsNeeded) continue
+    const roomsNeeded = stayRooms(rt.max_adults, adults, children, requestedRooms)
+    if (!roomsNeeded || !Number.isFinite(n) || n < roomsNeeded) continue
     const imgs = shapeTypeImages(rt, hotelSlug)
     types.push({
       id: rt.id,
@@ -90,6 +105,7 @@ async function typesFromPmsSellable(pool, hotelId, sellableByType, kioskRooms, a
       amenities: rt.amenities,
       available_count: n,
       rooms_needed: roomsNeeded,
+      extra_beds: extraBedsForStay(rt.max_adults, adults, children, roomsNeeded),
       rooms: roomsByTypeId[rt.id] || [],
     })
   }
@@ -107,7 +123,7 @@ function cheapestRoomType(types) {
 /** จองที่ยึดเลขห้องในคลัง PG — เช็คเอาต์ / ยกเลิก / ไม่มา ไม่ยึดห้องแล้ว */
 const ROOM_HOLD_STATUS_SQL = `b.status NOT IN ('cancelled', 'checked_out', 'no_show')`
 
-async function getAvailableRoomTypes(pool, hotelId, { checkIn, checkOut, adults = 1, children = 0, hotelSlug } = {}) {
+async function getAvailableRoomTypes(pool, hotelId, { checkIn, checkOut, adults = 1, children = 0, rooms, hotelSlug } = {}) {
   const adultsN = Math.max(1, Number(adults) || 1)
   const childrenN = Math.max(0, Number(children) || 0)
   const slug = await resolveHotelSlug(pool, hotelId, hotelSlug)
@@ -187,7 +203,7 @@ async function getAvailableRoomTypes(pool, hotelId, { checkIn, checkOut, adults 
   let types
   if (pmsSellableByType && Object.keys(pmsSellableByType).length) {
     types = await typesFromPmsSellable(
-      pool, hotelId, pmsSellableByType, kioskSyncedRooms, adultsN, childrenN, slug,
+      pool, hotelId, pmsSellableByType, kioskSyncedRooms, adultsN, childrenN, slug, rooms,
     )
   } else {
     const sourceRows = availableRooms.rows
@@ -225,8 +241,9 @@ async function getAvailableRoomTypes(pool, hotelId, { checkIn, checkOut, adults 
       })
     }
     types = Object.values(typeMap).filter((t) => {
-      t.rooms_needed = roomsNeededForParty(t.max_adults, adultsN, childrenN)
-      return typeFitsParty(t, adultsN, childrenN)
+      t.rooms_needed = stayRooms(t.max_adults, adultsN, childrenN, rooms)
+      t.extra_beds = extraBedsForStay(t.max_adults, adultsN, childrenN, t.rooms_needed)
+      return typeFitsParty(t, adultsN, childrenN, rooms)
     })
   }
 
@@ -260,6 +277,8 @@ async function getAvailableRoomTypes(pool, hotelId, { checkIn, checkOut, adults 
 
 module.exports = {
   roomsNeededForParty,
+  stayRooms,
+  extraBedsForStay,
   typeFitsParty,
   cheapestRoomType,
   stayNightPrice,

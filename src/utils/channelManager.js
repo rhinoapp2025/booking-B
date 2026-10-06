@@ -113,7 +113,7 @@ async function assertPmsOn(pool, hotelId) {
 
 async function listRatePlans(pool, hotelId) {
   const result = await pool.query(
-    `SELECT id, name, is_active, includes_breakfast, created_at
+    `SELECT id, name, is_active, includes_breakfast, includes_extrabed, created_at
      FROM rate_plans
      WHERE hotel_id = $1
      ORDER BY lower(name) ASC`,
@@ -134,12 +134,13 @@ async function createRatePlan(pool, hotelId, name, opts = {}) {
     throw err
   }
   const includesBreakfast = parseIncludesBreakfast(opts.includes_breakfast)
+  const includesExtrabed = parseIncludesBreakfast(opts.includes_extrabed)
   try {
     const result = await pool.query(
-      `INSERT INTO rate_plans (hotel_id, name, includes_breakfast)
-       VALUES ($1, $2, $3)
-       RETURNING id, name, is_active, includes_breakfast, created_at`,
-      [hotelId, trimmed, includesBreakfast]
+      `INSERT INTO rate_plans (hotel_id, name, includes_breakfast, includes_extrabed)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, name, is_active, includes_breakfast, includes_extrabed, created_at`,
+      [hotelId, trimmed, includesBreakfast, includesExtrabed]
     )
     return result.rows[0]
   } catch (err) {
@@ -173,6 +174,10 @@ async function updateRatePlan(pool, hotelId, planId, patch = {}) {
     params.push(parseIncludesBreakfast(patch.includes_breakfast))
     fields.push(`includes_breakfast = $${params.length}`)
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'includes_extrabed')) {
+    params.push(parseIncludesBreakfast(patch.includes_extrabed))
+    fields.push(`includes_extrabed = $${params.length}`)
+  }
   if (!fields.length) {
     const err = new Error('ไม่มีข้อมูลที่จะแก้')
     err.status = 400
@@ -182,7 +187,7 @@ async function updateRatePlan(pool, hotelId, planId, patch = {}) {
   const result = await pool.query(
     `UPDATE rate_plans SET ${fields.join(', ')}
      WHERE id = $1 AND hotel_id = $2
-     RETURNING id, name, is_active, includes_breakfast, created_at`,
+     RETURNING id, name, is_active, includes_breakfast, includes_extrabed, created_at`,
     params
   )
   if (!result.rows[0]) {
@@ -322,7 +327,7 @@ async function upsertAllotments(pool, hotelId, roomTypeId, dates, roomsToSell) {
 }
 
 async function upsertRateColumn(pool, hotelId, roomTypeId, ratePlanId, dates, column, value) {
-  if (column !== 'price' && column !== 'abf' && column !== 'display_price') {
+  if (column !== 'price' && column !== 'abf' && column !== 'display_price' && column !== 'extrabed') {
     const err = new Error('คอลัมน์ราคาไม่ถูกต้อง')
     err.status = 400
     throw err
@@ -338,7 +343,7 @@ async function upsertRateColumn(pool, hotelId, roomTypeId, ratePlanId, dates, co
       `DELETE FROM channel_rates
        WHERE hotel_id = $1 AND room_type_id = $2 AND rate_plan_id = $3
          AND stay_date = ANY($4::date[])
-         AND price IS NULL AND abf IS NULL AND display_price IS NULL`,
+         AND price IS NULL AND abf IS NULL AND display_price IS NULL AND extrabed IS NULL`,
       [hotelId, roomTypeId, ratePlanId, dates]
     )
     return { updated: dates.length, cleared: true, column }
@@ -354,20 +359,24 @@ async function upsertRateColumn(pool, hotelId, roomTypeId, ratePlanId, dates, co
   dates.forEach((d) => {
     params.push(d)
     if (column === 'price') {
-      values.push(`($1, $2, $3, $${params.length}::date, ${n}, NULL, NULL, NOW())`)
+      values.push(`($1, $2, $3, $${params.length}::date, ${n}, NULL, NULL, NULL, NOW())`)
     } else if (column === 'abf') {
-      values.push(`($1, $2, $3, $${params.length}::date, NULL, ${n}, NULL, NOW())`)
+      values.push(`($1, $2, $3, $${params.length}::date, NULL, ${n}, NULL, NULL, NOW())`)
+    } else if (column === 'extrabed') {
+      values.push(`($1, $2, $3, $${params.length}::date, NULL, NULL, NULL, ${n}, NOW())`)
     } else {
-      values.push(`($1, $2, $3, $${params.length}::date, NULL, NULL, ${n}, NOW())`)
+      values.push(`($1, $2, $3, $${params.length}::date, NULL, NULL, ${n}, NULL, NOW())`)
     }
   })
   const setCol = column === 'price'
     ? 'price = EXCLUDED.price'
     : column === 'abf'
       ? 'abf = EXCLUDED.abf'
-      : 'display_price = EXCLUDED.display_price'
+      : column === 'extrabed'
+        ? 'extrabed = EXCLUDED.extrabed'
+        : 'display_price = EXCLUDED.display_price'
   await pool.query(
-    `INSERT INTO channel_rates (hotel_id, room_type_id, rate_plan_id, stay_date, price, abf, display_price, updated_at)
+    `INSERT INTO channel_rates (hotel_id, room_type_id, rate_plan_id, stay_date, price, abf, display_price, extrabed, updated_at)
      VALUES ${values.join(', ')}
      ON CONFLICT (hotel_id, room_type_id, rate_plan_id, stay_date)
      DO UPDATE SET ${setCol}, updated_at = NOW()`,
@@ -703,7 +712,7 @@ async function getCalendar(pool, hotelId, { from, to, days }) {
     : { rows: [] }
   const links = typeIds.length
     ? await pool.query(
-      `SELECT rtrp.room_type_id, rp.id, rp.name, rp.is_active, rp.includes_breakfast
+      `SELECT rtrp.room_type_id, rp.id, rp.name, rp.is_active, rp.includes_breakfast, rp.includes_extrabed
        FROM room_type_rate_plans rtrp
        JOIN rate_plans rp ON rp.id = rtrp.rate_plan_id
        WHERE rtrp.hotel_id = $1 AND rtrp.room_type_id = ANY($2)
@@ -713,7 +722,7 @@ async function getCalendar(pool, hotelId, { from, to, days }) {
     : { rows: [] }
   const rates = typeIds.length
     ? await pool.query(
-      `SELECT room_type_id, rate_plan_id, to_char(stay_date, 'YYYY-MM-DD') AS stay_date, price, abf, display_price
+      `SELECT room_type_id, rate_plan_id, to_char(stay_date, 'YYYY-MM-DD') AS stay_date, price, abf, display_price, extrabed
        FROM channel_rates
        WHERE hotel_id = $1 AND room_type_id = ANY($2) AND stay_date BETWEEN $3::date AND $4::date`,
       [hotelId, typeIds, start, end]
@@ -735,6 +744,7 @@ async function getCalendar(pool, hotelId, { from, to, days }) {
   }
   const rateMap = {}
   const abfMap = {}
+  const extrabedMap = {}
   const displayMap = {}
   const stopMap = {}
   for (const row of rates.rows) {
@@ -746,6 +756,10 @@ async function getCalendar(pool, hotelId, { from, to, days }) {
     if (row.abf != null) {
       if (!abfMap[key]) abfMap[key] = {}
       abfMap[key][row.stay_date] = Number(row.abf)
+    }
+    if (row.extrabed != null) {
+      if (!extrabedMap[key]) extrabedMap[key] = {}
+      extrabedMap[key][row.stay_date] = Number(row.extrabed)
     }
     if (row.display_price != null) {
       if (!displayMap[key]) displayMap[key] = {}
@@ -766,8 +780,10 @@ async function getCalendar(pool, hotelId, { from, to, days }) {
       name: row.name,
       is_active: row.is_active,
       includes_breakfast: row.includes_breakfast === true,
+      includes_extrabed: row.includes_extrabed === true,
       prices: rateMap[key] || {},
       abf: abfMap[key] || {},
+      extrabed: extrabedMap[key] || {},
       display_prices: displayMap[key] || {},
       stop_sale: stopMap[key] || {},
     })
@@ -829,7 +845,7 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
     return { dates, nights: 0, room: null, breakfast: null, plans: [], channel_closed: false, linked_plans: 0 }
   }
   const plans = await pool.query(
-    `SELECT rp.id, rp.name, rp.includes_breakfast
+    `SELECT rp.id, rp.name, rp.includes_breakfast, rp.includes_extrabed
      FROM room_type_rate_plans rtrp
      JOIN rate_plans rp ON rp.id = rtrp.rate_plan_id
      WHERE rtrp.hotel_id = $1 AND rtrp.room_type_id = $2 AND rp.is_active = true
@@ -848,7 +864,7 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
     }
   }
   const rates = await pool.query(
-    `SELECT rate_plan_id, to_char(stay_date, 'YYYY-MM-DD') AS stay_date, price, abf, display_price
+    `SELECT rate_plan_id, to_char(stay_date, 'YYYY-MM-DD') AS stay_date, price, abf, display_price, extrabed
      FROM channel_rates
      WHERE hotel_id = $1 AND room_type_id = $2
        AND rate_plan_id = ANY($3) AND stay_date = ANY($4::date[])`,
@@ -867,6 +883,7 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
     byPlan[row.rate_plan_id][row.stay_date] = {
       price: row.price == null ? null : Number(row.price),
       abf: row.abf == null ? null : Number(row.abf),
+      extrabed: row.extrabed == null ? null : Number(row.extrabed),
       display_price: row.display_price == null ? null : Number(row.display_price),
     }
   }
@@ -885,8 +902,13 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
     if (dates.some((d) => nightly[d]?.price == null)) continue
     const roomTotal = dates.reduce((sum, d) => sum + Number(nightly[d].price || 0), 0)
     const withBf = plan.includes_breakfast === true
+    const withExtra = plan.includes_extrabed === true
     const abfUnitTotal = withBf
       ? dates.reduce((sum, d) => sum + Number(nightly[d].abf || 0), 0)
+      : 0
+    const extrabedPriced = withExtra && dates.every((d) => nightly[d]?.extrabed != null)
+    const extrabedUnitTotal = extrabedPriced
+      ? dates.reduce((sum, d) => sum + Number(nightly[d].extrabed || 0), 0)
       : 0
     const hasFullDisplay = dates.every((d) => nightly[d]?.display_price != null)
     const displayTotal = hasFullDisplay
@@ -901,6 +923,7 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
       name: plan.name,
       rate_plan_name: plan.name,
       includes_breakfast: withBf,
+      includes_extrabed: withExtra,
       room_total: roomTotal,
       roomAvg,
       price_per_night: roomAvg,
@@ -909,6 +932,10 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
       abf_unit_total: abfUnitTotal,
       abfAvg: nights ? abfUnitTotal / nights : 0,
       abf_per_person_per_night: withBf && nights ? abfUnitTotal / nights : 0,
+      extrabed_priced: extrabedPriced,
+      extrabed_unit_total: extrabedUnitTotal,
+      extrabedAvg: nights ? extrabedUnitTotal / nights : 0,
+      extrabed_per_night: extrabedPriced && nights ? extrabedUnitTotal / nights : 0,
       nights,
     }
     listed.push(candidate)
@@ -964,12 +991,14 @@ async function quoteChannelStay(pool, hotelId, roomTypeId, checkIn, checkOut, op
       rate_plan_id: picked.id,
       rate_plan_name: picked.name,
       includes_breakfast: canBf,
+      includes_extrabed: picked.includes_extrabed === true,
       breakfast_count: count,
       room_total: picked.room_total,
       abf_total: abfTotal,
       total: picked.room_total + abfTotal,
       roomAvg: picked.roomAvg,
       abfAvg: canBf ? picked.abfAvg : 0,
+      extrabedAvg: picked.includes_extrabed ? picked.extrabedAvg : 0,
       nights: picked.nights,
     }
   }
@@ -981,12 +1010,14 @@ async function quoteChannelStay(pool, hotelId, roomTypeId, checkIn, checkOut, op
       rate_plan_id: quotes.breakfast.rate_plan_id,
       rate_plan_name: quotes.breakfast.rate_plan_name,
       includes_breakfast: true,
+      includes_extrabed: quotes.breakfast.includes_extrabed === true,
       breakfast_count: breakfastCount,
       room_total: roomQuote.room_total,
       abf_total: abfTotal,
       total: roomQuote.room_total + abfTotal,
       roomAvg: roomQuote.roomAvg,
       abfAvg: quotes.breakfast.abfAvg,
+      extrabedAvg: quotes.breakfast.includes_extrabed ? quotes.breakfast.extrabedAvg : 0,
       nights: quotes.nights,
     }
   }
@@ -995,12 +1026,14 @@ async function quoteChannelStay(pool, hotelId, roomTypeId, checkIn, checkOut, op
     rate_plan_id: quotes.room.rate_plan_id,
     rate_plan_name: quotes.room.rate_plan_name,
     includes_breakfast: false,
+    includes_extrabed: quotes.room.includes_extrabed === true,
     breakfast_count: 0,
     room_total: quotes.room.room_total,
     abf_total: 0,
     total: quotes.room.room_total,
     roomAvg: quotes.room.roomAvg,
     abfAvg: 0,
+    extrabedAvg: quotes.room.includes_extrabed ? quotes.room.extrabedAvg : 0,
     nights: quotes.nights,
   }
 }
@@ -1018,20 +1051,35 @@ async function applyChannelToTypes(pool, hotelId, types, checkIn, checkOut) {
       type.abf_per_person_per_night = 0
       continue
     }
+    let plans = quotes.plans || []
+    if (Number(type.extra_beds) > 0) {
+      plans = plans.filter((p) => p.extrabed_priced)
+    }
+    if (!plans.length) {
+      type.channel_closed = true
+      type.rate_plans = []
+      type.breakfast_available = false
+      type.abf_per_night = 0
+      type.abf_per_person_per_night = 0
+      continue
+    }
+    const cheapest = plans.reduce((best, p) => (!best || p.room_total < best.room_total ? p : best), null)
     type.channel_closed = false
-    type.rate_plans = (quotes.plans || []).map((p) => ({
+    type.rate_plans = plans.map((p) => ({
       id: p.id,
       name: p.name,
       includes_breakfast: p.includes_breakfast,
+      includes_extrabed: p.includes_extrabed,
       price_per_night: p.price_per_night,
       display_price_per_night: p.display_price_per_night,
       discount_percent: p.discount_percent,
       abf_per_person_per_night: p.abf_per_person_per_night,
+      extrabed_per_night: p.extrabed_per_night,
     }))
-    type.price_per_night = quotes.room.roomAvg
-    type.display_price_per_night = quotes.room.display_price_per_night || null
-    type.discount_percent = quotes.room.discount_percent || null
-    type.channel_rate_plan = quotes.room.rate_plan_name
+    type.price_per_night = cheapest.roomAvg
+    type.display_price_per_night = cheapest.display_price_per_night || null
+    type.discount_percent = cheapest.discount_percent || null
+    type.channel_rate_plan = cheapest.rate_plan_name
     type.abf_per_night = 0
     type.breakfast_available = type.rate_plans.some((p) => p.includes_breakfast)
     type.abf_per_person_per_night = quotes.breakfast?.abfAvg || 0

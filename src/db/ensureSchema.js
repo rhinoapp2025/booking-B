@@ -438,6 +438,10 @@ async function ensureSchema() {
       ADD COLUMN IF NOT EXISTS includes_breakfast BOOLEAN NOT NULL DEFAULT false
   `)
   await pool.query(`
+    ALTER TABLE rate_plans
+      ADD COLUMN IF NOT EXISTS includes_extrabed BOOLEAN NOT NULL DEFAULT false
+  `)
+  await pool.query(`
     ALTER TABLE bookings
       ADD COLUMN IF NOT EXISTS rate_plan_id UUID REFERENCES rate_plans(id) ON DELETE SET NULL
   `)
@@ -486,6 +490,10 @@ async function ensureSchema() {
   await pool.query(`
     ALTER TABLE channel_rates
       ADD COLUMN IF NOT EXISTS abf NUMERIC(10, 2)
+  `)
+  await pool.query(`
+    ALTER TABLE channel_rates
+      ADD COLUMN IF NOT EXISTS extrabed NUMERIC(10, 2)
   `)
   await pool.query(`
     ALTER TABLE channel_rates ALTER COLUMN price DROP NOT NULL

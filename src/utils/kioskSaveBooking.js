@@ -200,8 +200,8 @@ async function appendResvGroup(transaction, {
     .input('NationCardID', sql.VarChar(16), clip(payload.NationCardId, 16))
     .input('HotelId', sql.Int, parseInt(hotelID, 10))
     .input('AbfAdult', sql.Int, isHeader ? 0 : (Number(payload.AbfAdult) || 0))
-    .input('ExtraBedCount', sql.Int, 0)
-    .input('ExtraBedAbfAmt', sql.Float, 0)
+    .input('ExtraBedCount', sql.Int, gstNo === 1 ? Math.max(0, Number(payload.ExtraBedCount) || 0) : 0)
+    .input('ExtraBedAbfAmt', sql.Float, gstNo === 1 ? (Number(payload.ExtraBedAbfAmt) || 0) : 0)
     .input('Email', sql.VarChar(64), clip(payload.Email, 64))
     .input('CarId', sql.VarChar(16), clip(payload.CarNo, 16))
     .input('FileImage', sql.VarChar(50), '')
@@ -379,10 +379,10 @@ async function saveKioskBookingToPms({ settings, payload, assignRoom = true }) {
         .input('DiscBaht', sql.Float, 0)
         .input('AbfAdult', sql.Int, Number(payload.AbfAdult) || 0)
         .input('AbfChildAmt', sql.Float, 0)
-        .input('ExtraBedCount', sql.Int, 0)
+        .input('ExtraBedCount', sql.Int, i === 1 ? Math.max(0, Number(payload.ExtraBedCount) || 0) : 0)
         .input('BabyCotCount', sql.SmallInt, 0)
         .input('BabyCotAmt', sql.Float, 0)
-        .input('ExtraBedAbfAmt', sql.Float, 0)
+        .input('ExtraBedAbfAmt', sql.Float, i === 1 ? (Number(payload.ExtraBedAbfAmt) || 0) : 0)
         .input('BabyCotAbfAmt', sql.Float, 0)
         .input('ShiftNo', sql.SmallInt, 1)
         .input('TaxId', sql.VarChar(32), '')
@@ -424,7 +424,8 @@ async function pushBookingToPms(pg, hotelId, bookingId) {
     `SELECT b.*,
             br.price_per_night, br.nights, br.room_type_id,
             r.room_number,
-            rt.name AS room_type_name
+            rt.name AS room_type_name,
+            rt.max_adults AS room_max_adults
      FROM bookings b
      LEFT JOIN booking_rooms br ON br.booking_id = b.id
      LEFT JOIN rooms r ON r.id = br.room_id
@@ -465,6 +466,7 @@ async function pushBookingToPms(pg, hotelId, bookingId) {
   let roomRateAmt = Number(row.price_per_night) || 0
   let abfAmt = 0
   let abfAdult = 0
+  let extraBedAmt = 0
   try {
     const { quoteChannelStay } = require('./channelManager')
     const channelQuote = await quoteChannelStay(
@@ -484,6 +486,7 @@ async function pushBookingToPms(pg, hotelId, bookingId) {
       roomRateAmt = Number(channelQuote.roomAvg) || roomRateAmt
       abfAmt = channelQuote.includes_breakfast ? Number(channelQuote.abfAvg) || 0 : 0
       abfAdult = channelQuote.includes_breakfast ? Number(channelQuote.breakfast_count) || 0 : 0
+      extraBedAmt = channelQuote.includes_extrabed ? Number(channelQuote.extrabedAvg) || 0 : 0
     } else if (row.include_breakfast) {
       abfAmt = 0
       abfAdult = 0
@@ -503,7 +506,11 @@ async function pushBookingToPms(pg, hotelId, bookingId) {
   }
   roomRateAmt = applyStayCharges(roomRateAmt, chargeOpts).total
   if (abfAmt > 0) abfAmt = applyStayCharges(abfAmt, chargeOpts).total
+  if (extraBedAmt > 0) extraBedAmt = applyStayCharges(extraBedAmt, chargeOpts).total
 
+  const { extraBedsForStay } = require('./availableRooms')
+  const extraBedCount = extraBedsForStay(row.room_max_adults, row.num_adults, row.num_children, row.room_count)
+  if (extraBedCount < 1) extraBedAmt = 0
   const payload = {
     ResvDate: ymd(new Date()),
     ArrivalDate: ymd(row.check_in_date),
@@ -515,6 +522,8 @@ async function pushBookingToPms(pg, hotelId, bookingId) {
     RoomNo: '',
     RoomRateAmt: roomRateAmt,
     RoomCount: Math.max(1, Number(row.room_count) || 1),
+    ExtraBedCount: extraBedCount,
+    ExtraBedAbfAmt: extraBedAmt,
     AbfAdult: abfAdult,
     AbfAmt: abfAmt,
     GstTitle: row.guest_title,

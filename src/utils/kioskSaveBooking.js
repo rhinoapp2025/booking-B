@@ -364,6 +364,18 @@ async function pushBookingToPms(pg, hotelId, bookingId) {
     console.warn('[pms] channel rate lookup failed:', rateErr.message)
   }
 
+  const paySettings = await getHotelSettings(pg, hotelId, [
+    'payment_collect_mode', 'service_charge_percent', 'vat_percent',
+  ])
+  const { applyStayCharges } = require('./stayCharges')
+  const chargeOpts = {
+    collectFull: paySettings.payment_collect_mode === 'full',
+    serviceChargePercent: paySettings.service_charge_percent,
+    vatPercent: paySettings.vat_percent,
+  }
+  roomRateAmt = applyStayCharges(roomRateAmt, chargeOpts).total
+  if (abfAmt > 0) abfAmt = applyStayCharges(abfAmt, chargeOpts).total
+
   const payload = {
     ResvDate: ymd(new Date()),
     ArrivalDate: ymd(row.check_in_date),

@@ -2,10 +2,9 @@ const { getHotelSettings } = require('./hotelSettings')
 const { firstRoomImage, resolveRoomTypeImages } = require('./roomTypeImages')
 
 function typeFitsParty(type, adults, children) {
-  const maxA = Number(type.max_adults)
-  const maxC = Number(type.max_children)
-  if (Number.isFinite(maxA) && maxA > 0 && adults > maxA) return false
-  if (Number.isFinite(maxC) && maxC > 0 && children > maxC) return false
+  const maxPeople = Number(type.max_adults)
+  const party = Math.max(0, Number(adults) || 0) + Math.max(0, Number(children) || 0)
+  if (Number.isFinite(maxPeople) && maxPeople > 0 && party > maxPeople) return false
   return true
 }
 
@@ -150,8 +149,12 @@ async function getAvailableRoomTypes(pool, hotelId, { checkIn, checkOut, adults 
 
     if (kioskEnabled && hasConfig) {
       const {
-        getKioskVacantRooms, ensureKioskRoomsInPg, getKioskStaySellableByType,
+        getKioskVacantRooms, ensureKioskRoomsInPg, getKioskStaySellableByType, syncPmsRoomTypesToPg,
       } = require('./kioskVacantRooms')
+      await syncPmsRoomTypesToPg(pool, hotelId, {
+        dbName: kioskSettings.kiosk_db_name,
+        hotelID: kioskSettings.kiosk_hotel_id,
+      })
       const kioskRooms = await getKioskVacantRooms({
         dbName: kioskSettings.kiosk_db_name,
         hotelID: kioskSettings.kiosk_hotel_id,

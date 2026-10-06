@@ -376,6 +376,13 @@ async function syncPmsRoomTypesToPg(pg, hotelId, { dbName, hotelID }) {
        ON CONFLICT (hotel_id, name) DO NOTHING`,
       [hotelId, rt.code, rt.name || null, rt.max_adults]
     )
+    if (Number.isFinite(Number(rt.max_adults)) && Number(rt.max_adults) > 0) {
+      await pg.query(
+        `UPDATE room_types SET max_adults = $3
+         WHERE hotel_id = $1 AND name = $2`,
+        [hotelId, rt.code, rt.max_adults]
+      )
+    }
   }
   return pmsByCode
 }

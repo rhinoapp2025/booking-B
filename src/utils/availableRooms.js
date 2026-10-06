@@ -1,11 +1,18 @@
 const { getHotelSettings } = require('./hotelSettings')
 const { firstRoomImage, resolveRoomTypeImages } = require('./roomTypeImages')
 
+function roomsNeededForParty(maxPeople, adults, children) {
+  const party = Math.max(1, (Number(adults) || 0) + (Number(children) || 0))
+  const max = Number(maxPeople)
+  if (!Number.isFinite(max) || max <= 0) return 1
+  return Math.ceil(party / max)
+}
+
 function typeFitsParty(type, adults, children) {
-  const maxPeople = Number(type.max_adults)
-  const party = Math.max(0, Number(adults) || 0) + Math.max(0, Number(children) || 0)
-  if (Number.isFinite(maxPeople) && maxPeople > 0 && party > maxPeople) return false
-  return true
+  const needed = roomsNeededForParty(type.max_adults, adults, children)
+  const available = Number(type.available_count)
+  if (!Number.isFinite(available) || available <= 0) return false
+  return available >= needed
 }
 
 function stayNightPrice(type) {
@@ -65,8 +72,8 @@ async function typesFromPmsSellable(pool, hotelId, sellableByType, kioskRooms, a
   const types = []
   for (const rt of pgTypes.rows) {
     const n = Number(sellable[normTypeName(rt.name)])
-    if (!Number.isFinite(n) || n <= 0) continue
-    if (!typeFitsParty(rt, adults, children)) continue
+    const roomsNeeded = roomsNeededForParty(rt.max_adults, adults, children)
+    if (!Number.isFinite(n) || n < roomsNeeded) continue
     const imgs = shapeTypeImages(rt, hotelSlug)
     types.push({
       id: rt.id,
@@ -82,6 +89,7 @@ async function typesFromPmsSellable(pool, hotelId, sellableByType, kioskRooms, a
       cover_image: imgs.cover_image,
       amenities: rt.amenities,
       available_count: n,
+      rooms_needed: roomsNeeded,
       rooms: roomsByTypeId[rt.id] || [],
     })
   }
@@ -216,7 +224,10 @@ async function getAvailableRoomTypes(pool, hotelId, { checkIn, checkOut, adults 
         floor: row.floor,
       })
     }
-    types = Object.values(typeMap).filter((t) => typeFitsParty(t, adultsN, childrenN))
+    types = Object.values(typeMap).filter((t) => {
+      t.rooms_needed = roomsNeededForParty(t.max_adults, adultsN, childrenN)
+      return typeFitsParty(t, adultsN, childrenN)
+    })
   }
 
   // ราคาขายจาก channel manager เท่านั้น — ไม่ดึงเรท PMS / ราคาตั้งค่าประเภทห้อง
@@ -248,6 +259,7 @@ async function getAvailableRoomTypes(pool, hotelId, { checkIn, checkOut, adults 
 }
 
 module.exports = {
+  roomsNeededForParty,
   typeFitsParty,
   cheapestRoomType,
   stayNightPrice,

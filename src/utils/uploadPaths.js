@@ -24,11 +24,16 @@ function getRoomTypeUploadRoot() {
   return path.join(getUploadRoot(), 'room-types')
 }
 
+function getBookingSiteUploadRoot() {
+  return path.join(getUploadRoot(), 'booking-site')
+}
+
 async function ensureUploadDirs() {
   await fs.mkdir(getUiUploadRoot(), { recursive: true })
   await fs.mkdir(getChatUploadRoot(), { recursive: true })
   await fs.mkdir(getReviewUploadRoot(), { recursive: true })
   await fs.mkdir(getRoomTypeUploadRoot(), { recursive: true })
+  await fs.mkdir(getBookingSiteUploadRoot(), { recursive: true })
   await fs.mkdir(path.join(getUploadRoot(), 'renewal'), { recursive: true })
   await fs.mkdir(path.join(getUploadRoot(), 'booking-slips'), { recursive: true })
 }
@@ -77,6 +82,7 @@ module.exports = {
   getChatUploadRoot,
   getReviewUploadRoot,
   getRoomTypeUploadRoot,
+  getBookingSiteUploadRoot,
   ensureUploadDirs,
   recordStorageMarker,
   getStorageMarker,

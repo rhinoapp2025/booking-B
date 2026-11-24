@@ -1,6 +1,7 @@
 const { getPool } = require('../db/pool')
 const { HOTEL_RETURN, shapeHotel } = require('./hotelShape')
 const { attachHotelBranding } = require('./hotelBranding')
+const { logoIconVersion, hotelIconPublicUrl } = require('./hotelIcon')
 
 const BOT_UA = /bot|crawler|spider|facebookexternalhit|Facebot|Twitterbot|LinkedInBot|Slackbot|Discordbot|WhatsApp|Telegram|Line|Applebot|Googlebot|SkypeUriPreview|Iframely|embedly/i
 const SLUG_RE = /^\/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\/|$)/i
@@ -26,15 +27,19 @@ function absoluteUrl(origin, path) {
   return `${origin}${value.startsWith('/') ? value : `/${value}`}`
 }
 
-function shareHtml({ title, description, image, url }) {
+function shareHtml({ title, description, image, url, favicon, apple }) {
   const safeTitle = escapeHtml(title)
   const safeDescription = escapeHtml(description)
   const safeUrl = escapeHtml(url)
   const safeImage = escapeHtml(image)
+  const safeFavicon = escapeHtml(favicon || image)
+  const safeApple = escapeHtml(apple || favicon || image)
   return `<!doctype html>
 <html lang="th">
 <head>
   <meta charset="utf-8">
+  <link rel="icon" type="image/png" sizes="32x32" href="${safeFavicon}">
+  <link rel="apple-touch-icon" sizes="180x180" href="${safeApple}">
   <title>${safeTitle}</title>
   <meta name="description" content="${safeDescription}">
   <meta property="og:site_name" content="theotel">
@@ -75,8 +80,16 @@ async function hotelShareMeta(req, slug) {
   const hotel = await attachHotelBranding(pool, shapeHotel(result.rows[0]))
   const name = String(hotel.name || '').trim() || 'theotel'
   const description = String(hotel.description || '').replace(/\s+/g, ' ').trim() || `จองห้องพัก ${name}`
-  const image = absoluteUrl(origin, hotel.logo_url || hotel.login_image_url) || `${origin}/favicon.png`
-  return { title: name, description, image, url: pageUrl }
+  let version = '0'
+  try {
+    version = logoIconVersion(new URL(hotel.logo_url || '', origin).searchParams.get('v') || '')
+  } catch {
+    version = '0'
+  }
+  const favicon = hotelIconPublicUrl(origin, slug, 32, version)
+  const apple = hotelIconPublicUrl(origin, slug, 180, version)
+  const image = absoluteUrl(origin, hotel.logo_url || hotel.login_image_url) || hotelIconPublicUrl(origin, slug, 512, version)
+  return { title: name, description, image, url: pageUrl, favicon, apple }
 }
 
 function slugFromPath(path) {

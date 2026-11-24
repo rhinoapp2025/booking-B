@@ -1820,5 +1820,6 @@ router.get('/:hotelSlug/kiosk-rooms', requireHotelAdmin, async (req, res) => {
 })
 
 router.use('/:hotelSlug/channel', requireHotelAdmin, require('./channel'))
+router.use(require('./adminBookingSite'))
 
 module.exports = router

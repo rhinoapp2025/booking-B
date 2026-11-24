@@ -31,6 +31,7 @@ const HOTEL_FEATURE_CATALOG = [
     hint: 'เปิด/ปิดความสามารถที่แขกใช้ตอนจองและชำระมัดจำ',
     items: [
       { key: 'feat_payment_slip', label: 'มัดจำ / อัปโหลดสลิป', default: true },
+      { key: 'feat_booking_site', label: 'เว็บไซต์สาขา', default: true },
     ],
   },
   {

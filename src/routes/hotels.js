@@ -3,7 +3,7 @@ const auth   = require('../middleware/authMiddleware')
 const admin  = require('../middleware/adminMiddleware')
 const { getPool } = require('../db/pool')
 const { getHotelSettings } = require('../utils/hotelSettings')
-const { resolveHotelFeatures } = require('../utils/hotelFeatureFlags')
+const { resolveHotelFeatures, isHotelFeatureEnabled } = require('../utils/hotelFeatureFlags')
 const { HOTEL_RETURN, shapeHotel, shapeHotelWithCatalog } = require('../utils/hotelShape')
 const { getHotelBookingPolicies, applyBookingPolicies } = require('../utils/bookingPolicies')
 const { attachHotelBranding, attachHotelsBranding, readUiImage, normalizeKind, settingKeyForKind } = require('../utils/hotelBranding')
@@ -12,6 +12,9 @@ const { getAvailableRoomTypes, cheapestRoomType, stayNightPrice } = require('../
 const { getNetworkBranding, readNetworkUiImage } = require('../utils/networkBranding')
 const { bookingOpenByHotelId, isHotelBookingOpen, setHotelBookingOpen } = require('../utils/bookingOpen')
 const { sendHotelShare } = require('../utils/sharePage')
+const { parseIconSize, renderHotelIconPng, buildHotelBranding } = require('../utils/hotelIcon')
+const { getBookingSiteContent } = require('../utils/bookingSite')
+const { isAllowedFilename, readFolderImage, mimeForFilename } = require('../utils/bookingSiteImages')
 
 // GET /api/hotels — รายชื่อโรงแรมทั้งหมดที่ active
 router.get('/', async (req, res) => {
@@ -153,6 +156,116 @@ router.get('/search', async (req, res) => {
       provinces,
       hotels: rows,
     })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+function publicOrigin(req) {
+  const proto = String(req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim()
+  const host = String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim()
+  return `${proto}://${host}`
+}
+
+async function loadActiveHotel(pool, slug) {
+  const result = await pool.query(
+    `SELECT ${HOTEL_RETURN} FROM hotels WHERE slug = $1 AND is_active = true`,
+    [slug]
+  )
+  return result.rows[0] ? shapeHotel(result.rows[0]) : null
+}
+
+// GET /api/hotels/:slug/branding — ชื่อและไอคอนสี่เหลี่ยมของสาขา
+router.get('/:slug/branding', async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await loadActiveHotel(pool, String(req.params.slug || '').toLowerCase())
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const settings = await getHotelSettings(pool, hotel.id, ['ui_logo_url'])
+    const origin = publicOrigin(req)
+    res.set('Cache-Control', 'public, max-age=300')
+    res.json(buildHotelBranding(origin, hotel, settings.ui_logo_url))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/hotels/:slug/icon/:size.png — รูปแท็บและไอคอนแชร์ของสาขานี้
+router.get('/:slug/icon/:size.png', async (req, res) => {
+  const size = parseIconSize(req.params.size)
+  if (!size) return res.status(400).json({ error: 'ขนาดไอคอนไม่รองรับ' })
+  try {
+    const pool = getPool()
+    const hotel = await loadActiveHotel(pool, String(req.params.slug || '').toLowerCase())
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const settings = await getHotelSettings(pool, hotel.id, ['ui_logo_url', 'ui_color_primary'])
+    const png = await renderHotelIconPng({
+      hotelId: hotel.id,
+      hotelName: hotel.name,
+      logoFilename: settings.ui_logo_url,
+      primaryColor: settings.ui_color_primary,
+      size,
+    })
+    res.set('Content-Type', 'image/png')
+    res.set('Cache-Control', 'public, max-age=86400')
+    res.send(png)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/hotels/:slug/share-preview — ชื่อ รูป และลิงก์สำหรับพรีวิวแชร์
+router.get('/:slug/share-preview', async (req, res) => {
+  try {
+    const pool = getPool()
+    const slug = String(req.params.slug || '').toLowerCase()
+    const hotel = await loadActiveHotel(pool, slug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const branded = await attachHotelBranding(pool, hotel)
+    const settings = await getHotelSettings(pool, hotel.id, ['ui_logo_url'])
+    const origin = publicOrigin(req)
+    const branding = buildHotelBranding(origin, hotel, settings.ui_logo_url)
+    const name = String(hotel.name || '').trim() || slug
+    res.set('Cache-Control', 'public, max-age=300')
+    res.json({
+      title: name,
+      description: String(hotel.description || '').replace(/\s+/g, ' ').trim() || `จองห้องพัก ${name}`,
+      image: branded.logo_url ? `${origin}${branded.logo_url}` : branding.icons.pwa512,
+      url: `${origin}/${slug}`,
+      icons: branding.icons,
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/hotels/:slug/booking-site — เว็บไซต์สาธารณะของสาขา
+router.get('/:slug/booking-site', async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await loadActiveHotel(pool, String(req.params.slug || '').toLowerCase())
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    if (!(await isHotelFeatureEnabled(pool, hotel.id, 'feat_booking_site'))) {
+      return res.status(403).json({ error: 'สาขานี้ปิดเว็บไซต์ไว้', code: 'BOOKING_SITE_DISABLED' })
+    }
+    res.set('Cache-Control', 'private, no-store')
+    res.json(await getBookingSiteContent(pool, hotel))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/:slug/booking-site/images/:folder/:filename', async (req, res) => {
+  if (!isAllowedFilename(req.params.filename)) return res.status(404).json({ error: 'Not found' })
+  try {
+    const pool = getPool()
+    const hotel = await loadActiveHotel(pool, String(req.params.slug || '').toLowerCase())
+    if (!hotel) return res.status(404).json({ error: 'Not found' })
+    const file = await readFolderImage(hotel.id, req.params.folder, req.params.filename)
+    if (!file) return res.status(404).json({ error: 'Not found' })
+    res.set('Content-Type', mimeForFilename(req.params.filename))
+    res.set('Cache-Control', 'public, max-age=86400')
+    res.send(file)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

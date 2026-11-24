@@ -1,0 +1,108 @@
+{
+  "site": {
+    "name": "โรงแรม",
+    "logoText": "HOTEL",
+    "logoSub": "",
+    "bookingUrl": "",
+    "bookingLabel": "เข้าพัก",
+    "newTab": false,
+    "address": "",
+    "phone": "",
+    "email": ""
+  },
+  "layoutVersion": 2,
+  "nav": [
+    { "section": "top", "label": "หน้าแรก", "show": true },
+    { "section": "rooms", "label": "ห้องพัก", "show": true },
+    { "section": "news", "label": "รีวิว", "show": true },
+    { "section": "promo", "label": "โปรโมชั่น", "show": true },
+    { "section": "dining", "label": "บรรยากาศ", "show": false },
+    { "section": "about", "label": "ที่อยู่", "show": true },
+    { "section": "book", "label": "จองเลย", "show": true },
+    { "section": "contact", "label": "ติดต่อ", "show": false }
+  ],
+  "roomsHeading": "ห้องพัก",
+  "promosHeading": "โปรโมชั่น",
+  "theme": {
+    "bg": "#f4f1ea",
+    "ink": "#1a2332",
+    "mute": "#5c6570",
+    "gold": "#8a6a3b",
+    "phFrom": "#d9cbb3",
+    "phTo": "#efe6d6",
+    "heroText": "#1a2332",
+    "heroMute": "#5c6570",
+    "heroAccent": "#8a6a3b",
+    "heroBtnBg": "#001529",
+    "heroBtnText": "#f7f4ee",
+    "heroBarBg": "rgba(247,244,238,.9)",
+    "heroBarBorder": "#e4d8c4",
+    "heroBarText": "#1a2332",
+    "heroBarBtnBg": "#001529",
+    "heroBarBtnText": "#f7f4ee",
+    "heroBtnSize": "13px",
+    "roomTitle": "#1a2332",
+    "roomText": "#5c6570",
+    "roomLink": "#8a6a3b",
+    "serif": "\"Cormorant Garamond\",\"Georgia\",serif",
+    "sans": "\"Noto Sans Thai\",\"Helvetica Neue\",Arial,sans-serif",
+    "radius": "16px",
+    "heroOverlay": true,
+    "lightEnhance": true,
+    "darkEnhance": false,
+    "surface": "#fbf8f3",
+    "line": "#e4d8c4",
+    "border": "#e4d8c4"
+  },
+  "hero": [
+    {
+      "tab": "หน้าแรก",
+      "title": "เข้าพักแบบจองได้เลย",
+      "text": "เลือกวันเข้าพัก แล้วจองห้องกับโรงแรมโดยตรง",
+      "button": "จองห้อง",
+      "link": "",
+      "showBooking": true,
+      "showImage": true,
+      "image": ""
+    }
+  ],
+  "about": {
+    "title": "ที่อยู่โรงแรม",
+    "text": "เดินทางมาตามที่อยู่ด้านล่าง จองล่วงหน้าแล้วเช็คอินตามเวลาได้เลย",
+    "mapUrl": "",
+    "showMap": true,
+    "showImage": false,
+    "imageFirst": false,
+    "image": ""
+  },
+  "rooms": [
+    {
+      "name": "ห้องมาตรฐาน",
+      "detail": "เตียงใหญ่ · ห้องน้ำในตัว",
+      "showImage": true,
+      "image": "",
+      "link": "",
+      "type": "standard",
+      "icon": "star"
+    }
+  ],
+  "promos": [
+    {
+      "title": "จองตรงวันนี้",
+      "text": "โปรโมชั่นสำหรับการจองผ่านเว็บโรงแรม",
+      "showImage": true,
+      "image": "",
+      "link": ""
+    }
+  ],
+  "dining": {
+    "title": "",
+    "text": "",
+    "showImage": false,
+    "image": ""
+  },
+  "newsHeading": "รีวิว",
+  "newsShowImage": false,
+  "newsImage": "",
+  "news": []
+}

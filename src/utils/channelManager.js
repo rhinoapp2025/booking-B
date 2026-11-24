@@ -341,6 +341,48 @@ function emptyRateTuple(column, n) {
   return cols[column].join(', ')
 }
 
+function capSellRooms(requested, vacant) {
+  const ask = Number(requested)
+  const real = Number(vacant)
+  const safeReal = Number.isFinite(real) && real > 0 ? Math.floor(real) : 0
+  if (!Number.isFinite(ask) || ask < 0) return safeReal
+  return Math.min(Math.floor(ask), safeReal)
+}
+
+function vacantOnDate(vacantByType, typeName, ymd) {
+  const days = vacantByType?.[typeName]
+  if (days && days[ymd] != null && days[ymd] !== '') return Number(days[ymd])
+  const key = String(typeName || '').trim().toUpperCase()
+  if (!key) return 0
+  for (const [name, byDate] of Object.entries(vacantByType || {})) {
+    if (String(name || '').trim().toUpperCase() !== key) continue
+    if (byDate?.[ymd] == null || byDate[ymd] === '') return 0
+    return Number(byDate[ymd])
+  }
+  return 0
+}
+
+async function loadVacantByTypeName(pool, hotelId, dates) {
+  if (!dates.length) return {}
+  const sorted = [...dates].sort()
+  const settings = await getHotelSettings(pool, hotelId, [
+    'kiosk_enabled', 'kiosk_db_name', 'kiosk_hotel_id', 'kiosk_com_no',
+  ])
+  const pmsOn = settings.kiosk_enabled === 'true'
+    && Boolean(settings.kiosk_db_name && settings.kiosk_hotel_id && settings.kiosk_com_no)
+  if (pmsOn) {
+    const { getKioskVacantByTypeDate } = require('./kioskVacantRooms')
+    return getKioskVacantByTypeDate({
+      dbName: settings.kiosk_db_name,
+      hotelID: settings.kiosk_hotel_id,
+      comNo: settings.kiosk_com_no,
+      startDate: sorted[0],
+      endDate: sorted[sorted.length - 1],
+    })
+  }
+  return getLocalVacantByTypeDate(pool, hotelId, sorted)
+}
+
 function capPublicRooms(actual, cap) {
   const real = Number(actual)
   if (cap == null || cap === '') return Number.isFinite(real) ? real : 0
@@ -439,6 +481,38 @@ async function applyRoomCount(pool, hotelId, body, column) {
     const err = new Error('จำนวนห้องต้องเป็นจำนวนเต็ม 0–9999')
     err.status = 400
     throw err
+  }
+  if (column === 'sell_rooms') {
+    let vacantByType
+    try {
+      vacantByType = await loadVacantByTypeName(pool, hotelId, dates)
+    } catch (err) {
+      const error = new Error('โหลดจำนวนห้องว่างไม่สำเร็จ จึงยังไม่บันทึกจำนวนห้องขาย')
+      error.status = 409
+      throw error
+    }
+    const typeIds = [...new Set(pairs.map((pair) => pair.room_type_id))]
+    const typeRows = await pool.query(
+      `SELECT id, name FROM room_types WHERE hotel_id = $1 AND id = ANY($2)`,
+      [hotelId, typeIds]
+    )
+    const nameById = Object.fromEntries(typeRows.rows.map((row) => [row.id, row.name]))
+    let capped = 0
+    let updated = 0
+    for (const pair of pairs) {
+      const groups = new Map()
+      for (const day of dates) {
+        const sell = capSellRooms(n, vacantOnDate(vacantByType, nameById[pair.room_type_id], day))
+        if (sell < n) capped += 1
+        if (!groups.has(sell)) groups.set(sell, [])
+        groups.get(sell).push(day)
+      }
+      for (const [sell, days] of groups) {
+        await upsertRateColumn(pool, hotelId, pair.room_type_id, pair.rate_plan_id, days, column, sell)
+        updated += days.length
+      }
+    }
+    return { action: 'set', rooms: n, pairs: pairs.length, dates: dates.length, updated, capped }
   }
   for (const pair of pairs) {
     await upsertRateColumn(pool, hotelId, pair.room_type_id, pair.rate_plan_id, dates, column, n)
@@ -1188,6 +1262,7 @@ module.exports = {
   applyDisplayPrice,
   applyRoomCount,
   capPublicRooms,
+  capSellRooms,
   getCalendar,
   getStayAllotmentCap,
   getChannelQuotes,

@@ -7,6 +7,7 @@ const {
   featureDefaultSettingKey,
 } = require('../constants/hotelFeatureCatalog')
 const { getHotelSettings, setHotelSettings } = require('./hotelSettings')
+const { isBookingOpenValue } = require('./bookingOpen')
 
 function parseEnabled(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback
@@ -96,7 +97,7 @@ async function getPlatformFeatureState(pool) {
     const hotelMap = await getHotelSettings(
       pool,
       hotel.id,
-      ALL_FEATURE_KEYS.map(featureSettingKey)
+      [...ALL_FEATURE_KEYS.map(featureSettingKey), 'booking_open']
     )
     const overrides = {}
     for (const key of ALL_FEATURE_KEYS) overrides[key] = overrideState(hotelMap, key)
@@ -105,6 +106,7 @@ async function getPlatformFeatureState(pool) {
       slug: hotel.slug,
       name: hotel.name,
       is_active: hotel.is_active,
+      booking_open: isBookingOpenValue(hotelMap.booking_open),
       features: buildResolvedFeatures(hotelMap, appMap),
       overrides,
     })

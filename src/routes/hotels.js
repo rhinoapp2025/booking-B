@@ -10,6 +10,7 @@ const { attachHotelBranding, attachHotelsBranding, readUiImage, normalizeKind, s
 const { attachHotelTheme } = require('../utils/hotelTheme')
 const { getAvailableRoomTypes, cheapestRoomType, stayNightPrice } = require('../utils/availableRooms')
 const { getNetworkBranding, readNetworkUiImage } = require('../utils/networkBranding')
+const { bookingOpenByHotelId, isHotelBookingOpen } = require('../utils/bookingOpen')
 
 // GET /api/hotels — รายชื่อโรงแรมทั้งหมดที่ active
 router.get('/', async (req, res) => {
@@ -91,18 +92,22 @@ router.get('/search', async (req, res) => {
       hotelParams
     )
     const hotels = await attachHotelsBranding(pool, hotelsResult.rows.map(shapeHotel))
+    const bookingOpen = await bookingOpenByHotelId(pool, hotels.map((hotel) => hotel.id))
 
     const rows = []
     for (const hotel of hotels) {
+      const openForBooking = bookingOpen.get(String(hotel.id)) !== false
       let types = []
-      try {
-        const found = await getAvailableRoomTypes(pool, hotel.id, {
-          checkIn, checkOut, adults, children, rooms: rooms || undefined,
-          hotelSlug: hotel.slug,
-        })
-        types = found.types || []
-      } catch (err) {
-        console.warn(`[hotels] search ${hotel.slug} failed:`, err.message)
+      if (openForBooking) {
+        try {
+          const found = await getAvailableRoomTypes(pool, hotel.id, {
+            checkIn, checkOut, adults, children, rooms: rooms || undefined,
+            hotelSlug: hotel.slug,
+          })
+          types = found.types || []
+        } catch (err) {
+          console.warn(`[hotels] search ${hotel.slug} failed:`, err.message)
+        }
       }
       const cheapest = cheapestRoomType(types)
       rows.push({
@@ -120,7 +125,8 @@ router.get('/search', async (req, res) => {
         cover_image: hotel.cover_image || '',
         login_image_url: hotel.login_image_url || '',
         logo_url: hotel.logo_url || '',
-        available: Boolean(cheapest),
+        booking_open: openForBooking,
+        available: openForBooking && Boolean(cheapest),
         from_price: cheapest ? stayNightPrice(cheapest) : null,
         from_display_price: cheapest?.display_price_per_night || null,
         from_discount_percent: cheapest?.discount_percent || null,
@@ -165,6 +171,7 @@ router.get('/:slug', async (req, res) => {
     if (!result.rows[0]) return res.status(404).json({ error: 'Hotel not found' })
     const hotel = await shapeHotelWithCatalog(pool, result.rows[0])
     applyBookingPolicies(hotel, await getHotelBookingPolicies(pool, hotel.id))
+    hotel.booking_open = await isHotelBookingOpen(pool, hotel.id)
     await attachHotelBranding(pool, hotel)
     await attachHotelTheme(pool, hotel)
     res.json(hotel)
@@ -405,6 +412,7 @@ router.get('/:slug/available-rooms', async (req, res) => {
     )
     if (!hotelRow.rows[0]) return res.status(404).json({ error: 'Hotel not found' })
     const hotelId = hotelRow.rows[0].id
+    if (!(await isHotelBookingOpen(pool, hotelId))) return res.json([])
     const adultsN = Number(adults)
     const childrenN = Number(children)
 

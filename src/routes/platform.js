@@ -22,6 +22,7 @@ const {
   listCatalogOptions,
   saveCatalogOptions,
 } = require('../utils/hotelCatalogOptions')
+const { setHotelBookingOpen } = require('../utils/bookingOpen')
 
 function normalizeSlug(raw) {
   return String(raw || '').trim().toLowerCase()
@@ -47,10 +48,13 @@ router.patch('/features', async (req, res) => {
     }
 
     const hotelId = req.body?.hotel_id
-    if (hotelId && req.body?.features && typeof req.body.features === 'object') {
+    const hasFeatures = req.body?.features && typeof req.body.features === 'object'
+    const hasBookingOpen = Object.prototype.hasOwnProperty.call(req.body || {}, 'booking_open')
+    if (hotelId && (hasFeatures || hasBookingOpen)) {
       const hotel = await pool.query(`SELECT id FROM hotels WHERE id = $1`, [hotelId])
       if (!hotel.rows[0]) return res.status(404).json({ error: 'Hotel not found' })
-      await saveHotelFeatureOverrides(pool, hotelId, req.body.features)
+      if (hasFeatures) await saveHotelFeatureOverrides(pool, hotelId, req.body.features)
+      if (hasBookingOpen) await setHotelBookingOpen(pool, hotelId, req.body.booking_open)
     }
 
     res.json(await getPlatformFeatureState(pool))

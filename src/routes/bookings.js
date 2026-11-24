@@ -10,6 +10,7 @@ const {
 } = require('../utils/bookingPaymentSlips')
 const { notifyAdminPaymentSlipChat } = require('../utils/bookingChatNotify')
 const { getHotelSettings } = require('../utils/hotelSettings')
+const { isHotelBookingOpen } = require('../utils/bookingOpen')
 const { isHotelFeatureEnabled } = require('../utils/hotelFeatureFlags')
 const { getHotelBookingPolicies, applyBookingPolicies } = require('../utils/bookingPolicies')
 const { maybeSyncPmsStatuses, maybePushBookingToPms, maybeCancelBookingInPms } = require('../utils/kioskSaveBooking')
@@ -179,6 +180,9 @@ router.post('/:hotelSlug', auth, async (req, res) => {
     const pool = getPool()
     const hotel = await resolveHotelBySlug(pool, req.params.hotelSlug)
     if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    if (!(await isHotelBookingOpen(pool, hotel.id))) {
+      return res.status(409).json({ error: 'สาขานี้ปิดรับจอง' })
+    }
 
     const {
       check_in_date, check_out_date,

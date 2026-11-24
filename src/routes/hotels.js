@@ -11,6 +11,7 @@ const { attachHotelTheme } = require('../utils/hotelTheme')
 const { getAvailableRoomTypes, cheapestRoomType, stayNightPrice } = require('../utils/availableRooms')
 const { getNetworkBranding, readNetworkUiImage } = require('../utils/networkBranding')
 const { bookingOpenByHotelId, isHotelBookingOpen, setHotelBookingOpen } = require('../utils/bookingOpen')
+const { sendHotelShare } = require('../utils/sharePage')
 
 // GET /api/hotels — รายชื่อโรงแรมทั้งหมดที่ active
 router.get('/', async (req, res) => {
@@ -152,6 +153,15 @@ router.get('/search', async (req, res) => {
       provinces,
       hotels: rows,
     })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GET /api/hotels/:slug/share — หน้าตัวอย่างลิงก์สำหรับไลน์และตัวอ่านอื่น
+router.get('/:slug/share', async (req, res) => {
+  try {
+    await sendHotelShare(req, res, String(req.params.slug || '').toLowerCase())
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

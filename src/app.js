@@ -18,8 +18,11 @@ const {
   getStorageMarker,
 } = require('./utils/uploadPaths')
 
+const { shareBotMiddleware } = require('./utils/sharePage')
+
 const app = express()
 
+app.use(shareBotMiddleware)
 app.use(cors(createCorsOptions()))
 app.use(express.json({ limit: '3mb' }))
 app.use(passport.initialize())

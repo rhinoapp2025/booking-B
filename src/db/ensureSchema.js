@@ -525,6 +525,19 @@ async function ensureSchema() {
       CHECK (sell_rooms IS NULL OR (sell_rooms >= 0 AND sell_rooms <= 9999))
   `)
   await pool.query(`
+    ALTER TABLE room_types
+      ADD COLUMN IF NOT EXISTS stop_min_rooms SMALLINT
+  `)
+  await pool.query(`
+    ALTER TABLE room_types
+      DROP CONSTRAINT IF EXISTS room_types_stop_min_rooms_check
+  `)
+  await pool.query(`
+    ALTER TABLE room_types
+      ADD CONSTRAINT room_types_stop_min_rooms_check
+      CHECK (stop_min_rooms IS NULL OR (stop_min_rooms >= 0 AND stop_min_rooms <= 9999))
+  `)
+  await pool.query(`
     ALTER TABLE channel_rates
       ADD COLUMN IF NOT EXISTS display_rooms SMALLINT
   `)

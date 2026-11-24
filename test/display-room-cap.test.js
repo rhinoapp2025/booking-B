@@ -1,6 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { capPublicRooms, capSellRooms } = require('../src/utils/channelManager')
+const { capPublicRooms, capSellRooms, shouldAutoStopSale } = require('../src/utils/channelManager')
 
 test('no display cap keeps the real vacant count', () => {
   assert.equal(capPublicRooms(5, null), 5)
@@ -18,6 +18,15 @@ test('display cap stays when sales bring real inventory down to the cap', () => 
 test('real inventory below the display cap is what guests see', () => {
   assert.equal(capPublicRooms(2, 3), 2)
   assert.equal(capPublicRooms(0, 3), 0)
+})
+
+test('auto stop uses sell rooms when set, otherwise real vacant rooms', () => {
+  assert.equal(shouldAutoStopSale(2, 6, 1), false)
+  assert.equal(shouldAutoStopSale(2, 2, 10), true)
+  assert.equal(shouldAutoStopSale(2, null, 2), true)
+  assert.equal(shouldAutoStopSale(2, null, 3), false)
+  assert.equal(shouldAutoStopSale(2, null, null), false)
+  assert.equal(shouldAutoStopSale(null, null, 0), false)
 })
 
 test('rooms for sale cannot exceed that day vacant count', () => {

@@ -1,7 +1,7 @@
 const { getHotelSettings } = require('./hotelSettings')
 
-const DAY_WINDOWS = [7, 14, 30, 60, 120, 360]
-const MAX_CALENDAR_DAYS = 360
+const DAY_WINDOWS = [7, 14, 30, 60, 120, 360, 720, 1440]
+const MAX_CALENDAR_DAYS = 1440
 const MAX_BULK_DAYS = 366 * 3
 
 function addDaysYmd(ymd, days) {
@@ -339,6 +339,18 @@ function emptyRateTuple(column, n) {
     display_rooms: ['NULL', 'NULL', 'NULL', 'NULL', 'NULL', n],
   }
   return cols[column].join(', ')
+}
+
+function shouldAutoStopSale(minRooms, sellRooms, vacant) {
+  if (minRooms == null || minRooms === '') return false
+  const min = Number(minRooms)
+  if (!Number.isInteger(min) || min < 0) return false
+  const hasSell = sellRooms != null && sellRooms !== ''
+  const basis = hasSell
+    ? Number(sellRooms)
+    : (vacant == null || vacant === '' ? null : Number(vacant))
+  if (basis == null || !Number.isFinite(basis)) return false
+  return basis <= min
 }
 
 function capSellRooms(requested, vacant) {
@@ -748,6 +760,38 @@ async function applyStopSale(pool, hotelId, {
   return { action: 'stop', pairs: pairs.length, dates: dates.length, updated }
 }
 
+async function setStopMinRooms(pool, hotelId, body = {}) {
+  const { mode, room_type_id, rate_plan_id, rooms, action = 'set' } = body
+  const pairs = await resolveStopSalePairs(pool, hotelId, mode, room_type_id, rate_plan_id)
+  const typeIds = [...new Set(pairs.map((pair) => pair.room_type_id))]
+  const act = String(action || 'set').toLowerCase() === 'clear' ? 'clear' : 'set'
+  if (act === 'clear') {
+    await pool.query(
+      `UPDATE room_types SET stop_min_rooms = NULL
+       WHERE hotel_id = $1 AND id = ANY($2)`,
+      [hotelId, typeIds]
+    )
+    return { action: 'clear', room_types: typeIds.length }
+  }
+  if (rooms === undefined || rooms === null || String(rooms).trim() === '') {
+    const err = new Error('กรอกจำนวนห้องขั้นต่ำ')
+    err.status = 400
+    throw err
+  }
+  const n = Number(rooms)
+  if (!Number.isInteger(n) || n < 0 || n > 9999) {
+    const err = new Error('จำนวนห้องขั้นต่ำต้องเป็นจำนวนเต็ม 0–9999')
+    err.status = 400
+    throw err
+  }
+  await pool.query(
+    `UPDATE room_types SET stop_min_rooms = $3
+     WHERE hotel_id = $1 AND id = ANY($2)`,
+    [hotelId, typeIds, n]
+  )
+  return { action: 'set', rooms: n, room_types: typeIds.length }
+}
+
 async function upsertRates(pool, hotelId, roomTypeId, ratePlanId, dates, price) {
   return upsertRateColumn(pool, hotelId, roomTypeId, ratePlanId, dates, 'price', price)
 }
@@ -832,7 +876,7 @@ async function getCalendar(pool, hotelId, { from, to, days }) {
   }
 
   const types = await pool.query(
-    `SELECT id, name FROM room_types WHERE hotel_id = $1 AND is_active = true ORDER BY sort_order ASC, name ASC`,
+    `SELECT id, name, stop_min_rooms FROM room_types WHERE hotel_id = $1 AND is_active = true ORDER BY sort_order ASC, name ASC`,
     [hotelId]
   )
 
@@ -945,6 +989,7 @@ async function getCalendar(pool, hotelId, { from, to, days }) {
   const room_types = shown.map((rt) => ({
     id: rt.id,
     name: rt.name,
+    stop_min_rooms: rt.stop_min_rooms == null ? null : Number(rt.stop_min_rooms),
     pms_vacant: vacantByType[rt.name] || {},
     allotment: allotMap[rt.id] || {},
     rate_plans: plansByType[rt.id] || [],
@@ -1006,7 +1051,7 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
     }
   }
   const rates = await pool.query(
-    `SELECT rate_plan_id, to_char(stay_date, 'YYYY-MM-DD') AS stay_date, price, abf, display_price, extrabed, display_rooms
+    `SELECT rate_plan_id, to_char(stay_date, 'YYYY-MM-DD') AS stay_date, price, abf, display_price, extrabed, display_rooms, sell_rooms
      FROM channel_rates
      WHERE hotel_id = $1 AND room_type_id = $2
        AND rate_plan_id = ANY($3) AND stay_date = ANY($4::date[])`,
@@ -1028,6 +1073,25 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
       extrabed: row.extrabed == null ? null : Number(row.extrabed),
       display_price: row.display_price == null ? null : Number(row.display_price),
       display_rooms: row.display_rooms == null ? null : Number(row.display_rooms),
+      sell_rooms: row.sell_rooms == null ? null : Number(row.sell_rooms),
+    }
+  }
+  const typeMeta = await pool.query(
+    `SELECT name, stop_min_rooms FROM room_types WHERE id = $1 AND hotel_id = $2`,
+    [roomTypeId, hotelId]
+  )
+  const stopMin = typeMeta.rows[0]?.stop_min_rooms
+  let vacantByDate = {}
+  if (stopMin != null && typeMeta.rows[0]?.name) {
+    try {
+      const byName = await loadVacantByTypeName(pool, hotelId, dates)
+      const key = String(typeMeta.rows[0].name).trim().toUpperCase()
+      const days = byName[typeMeta.rows[0].name]
+        || Object.entries(byName).find(([name]) => String(name).trim().toUpperCase() === key)?.[1]
+        || {}
+      vacantByDate = days
+    } catch (err) {
+      console.warn('[channel] stop-min vacant lookup failed:', err.message)
     }
   }
   const stopped = new Set(stops.rows.map((r) => `${r.rate_plan_id}:${r.stay_date}`))
@@ -1038,7 +1102,13 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
   const displayCaps = []
   let stoppedPlanCount = 0
   for (const plan of plans.rows) {
-    if (dates.some((d) => stopped.has(`${plan.id}:${d}`))) {
+    const nightlyForStop = byPlan[plan.id] || {}
+    const autoStopped = dates.some((d) => shouldAutoStopSale(
+      stopMin,
+      nightlyForStop[d]?.sell_rooms,
+      vacantByDate[d]
+    ))
+    if (autoStopped || dates.some((d) => stopped.has(`${plan.id}:${d}`))) {
       stoppedPlanCount += 1
       continue
     }
@@ -1259,6 +1329,8 @@ module.exports = {
   upsertRates,
   upsertRateColumn,
   applyStopSale,
+  setStopMinRooms,
+  shouldAutoStopSale,
   applyDisplayPrice,
   applyRoomCount,
   capPublicRooms,

@@ -13,6 +13,7 @@ const {
   upsertAllotments,
   upsertRateColumn,
   applyStopSale,
+  setStopMinRooms,
   applyDisplayPrice,
   applyRoomCount,
   getCalendar,
@@ -144,6 +145,14 @@ router.put('/rates', async (req, res) => {
 router.post('/stop-sale', async (req, res) => {
   await withHotel(req, res, async (pool, hotel) => {
     const result = await applyStopSale(pool, hotel.id, req.body || {})
+    res.json(result)
+  })
+})
+
+/** หยุดขายอัตโนมัติเมื่อห้องเหลือไม่เกินค่าที่ตั้ง — action: set | clear */
+router.post('/stop-min-rooms', async (req, res) => {
+  await withHotel(req, res, async (pool, hotel) => {
+    const result = await setStopMinRooms(pool, hotel.id, req.body || {})
     res.json(result)
   })
 })

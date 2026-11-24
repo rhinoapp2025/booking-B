@@ -1793,6 +1793,69 @@ router.post('/:hotelSlug/kiosk-config/test', requireHotelAdmin, async (req, res)
   }
 })
 
+async function pmsConnection(pool, hotel) {
+  const settings = await getHotelSettings(pool, hotel.id, [
+    'kiosk_enabled', 'kiosk_db_name', 'kiosk_hotel_id', 'kiosk_com_no',
+  ])
+  if (settings.kiosk_enabled !== 'true' || !settings.kiosk_db_name || !settings.kiosk_hotel_id) {
+    const error = new Error('สาขานี้ไม่ได้ต่อ PMS')
+    error.status = 403
+    throw error
+  }
+  return {
+    dbName: settings.kiosk_db_name,
+    hotelID: settings.kiosk_hotel_id,
+    comNo: settings.kiosk_com_no,
+  }
+}
+
+// GET /api/admin/:hotelSlug/pms-calendar — ปฏิทินจอง PMS เริ่มวันนี้ ย้อนหลังจาก folio history
+router.get('/:hotelSlug/pms-calendar', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { loadPmsBookingCalendar } = require('../utils/pmsBookingCalendar')
+    const calendar = await loadPmsBookingCalendar({
+      ...pms,
+      bgnDate: req.query.bgn,
+      endDate: req.query.end,
+    })
+    res.json(calendar)
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
+router.post('/:hotelSlug/pms-calendar/stop-sale', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { stopSaleRoom } = require('../utils/pmsBookingCalendar')
+    const result = await stopSaleRoom({ dbName: pms.dbName, ...req.body })
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
+router.post('/:hotelSlug/pms-calendar/release', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { releaseSaleRoom } = require('../utils/pmsBookingCalendar')
+    const result = await releaseSaleRoom({ dbName: pms.dbName, ...req.body })
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
 // GET /api/admin/:hotelSlug/kiosk-rooms — สถานะห้อง live จาก Kiosk (RmSetupNum)
 router.get('/:hotelSlug/kiosk-rooms', requireHotelAdmin, async (req, res) => {
   try {

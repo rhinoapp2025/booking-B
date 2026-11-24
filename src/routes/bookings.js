@@ -313,6 +313,9 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       if (!channelQuotes.plans.length) {
         throw Object.assign(new Error('ยังไม่ได้ตั้งราคาขายในช่วงวันที่เลือก — ไปตั้งที่แท็บราคาขาย'), { status: 409 })
       }
+      if (channelQuotes.display_rooms_cap != null && roomCount > channelQuotes.display_rooms_cap) {
+        throw Object.assign(new Error('ไม่มีห้องว่างในช่วงวันที่เลือก'), { status: 409 })
+      }
       if (!chosenRatePlanId) {
         if (channelQuotes.plans.length === 1) chosenRatePlanId = channelQuotes.plans[0].id
         else throw Object.assign(new Error('กรุณาเลือกเรทแพลน'), { status: 400 })

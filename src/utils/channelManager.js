@@ -326,8 +326,44 @@ async function upsertAllotments(pool, hotelId, roomTypeId, dates, roomsToSell) {
   return { updated: dates.length, rooms_to_sell: n }
 }
 
+const RATE_COLUMNS = ['price', 'abf', 'display_price', 'extrabed', 'sell_rooms', 'display_rooms']
+const ROOM_COUNT_COLUMNS = new Set(['sell_rooms', 'display_rooms'])
+
+function emptyRateTuple(column, n) {
+  const cols = {
+    price: [n, 'NULL', 'NULL', 'NULL', 'NULL', 'NULL'],
+    abf: ['NULL', n, 'NULL', 'NULL', 'NULL', 'NULL'],
+    display_price: ['NULL', 'NULL', n, 'NULL', 'NULL', 'NULL'],
+    extrabed: ['NULL', 'NULL', 'NULL', n, 'NULL', 'NULL'],
+    sell_rooms: ['NULL', 'NULL', 'NULL', 'NULL', n, 'NULL'],
+    display_rooms: ['NULL', 'NULL', 'NULL', 'NULL', 'NULL', n],
+  }
+  return cols[column].join(', ')
+}
+
+function capPublicRooms(actual, cap) {
+  const real = Number(actual)
+  if (cap == null || cap === '') return Number.isFinite(real) ? real : 0
+  const n = Number(cap)
+  if (!Number.isFinite(n)) return Number.isFinite(real) ? real : 0
+  if (!Number.isFinite(real)) return n
+  return Math.min(real, n)
+}
+
+function minSetDisplayRooms(nightly, dates) {
+  let cap = null
+  for (const d of dates) {
+    const raw = nightly?.[d]?.display_rooms
+    if (raw == null || raw === '') continue
+    const n = Number(raw)
+    if (!Number.isFinite(n)) continue
+    cap = cap == null ? n : Math.min(cap, n)
+  }
+  return cap
+}
+
 async function upsertRateColumn(pool, hotelId, roomTypeId, ratePlanId, dates, column, value) {
-  if (column !== 'price' && column !== 'abf' && column !== 'display_price' && column !== 'extrabed') {
+  if (!RATE_COLUMNS.includes(column)) {
     const err = new Error('คอลัมน์ราคาไม่ถูกต้อง')
     err.status = 400
     throw err
@@ -343,13 +379,20 @@ async function upsertRateColumn(pool, hotelId, roomTypeId, ratePlanId, dates, co
       `DELETE FROM channel_rates
        WHERE hotel_id = $1 AND room_type_id = $2 AND rate_plan_id = $3
          AND stay_date = ANY($4::date[])
-         AND price IS NULL AND abf IS NULL AND display_price IS NULL AND extrabed IS NULL`,
+         AND price IS NULL AND abf IS NULL AND display_price IS NULL AND extrabed IS NULL
+         AND sell_rooms IS NULL AND display_rooms IS NULL`,
       [hotelId, roomTypeId, ratePlanId, dates]
     )
     return { updated: dates.length, cleared: true, column }
   }
   const n = Number(value)
-  if (!Number.isFinite(n) || n < 0) {
+  if (ROOM_COUNT_COLUMNS.has(column)) {
+    if (!Number.isInteger(n) || n < 0 || n > 9999) {
+      const err = new Error('จำนวนห้องต้องเป็นจำนวนเต็ม 0–9999')
+      err.status = 400
+      throw err
+    }
+  } else if (!Number.isFinite(n) || n < 0) {
     const err = new Error('ราคาต้องเป็นตัวเลขไม่ติดลบ')
     err.status = 400
     throw err
@@ -358,31 +401,49 @@ async function upsertRateColumn(pool, hotelId, roomTypeId, ratePlanId, dates, co
   const params = [hotelId, roomTypeId, ratePlanId]
   dates.forEach((d) => {
     params.push(d)
-    if (column === 'price') {
-      values.push(`($1, $2, $3, $${params.length}::date, ${n}, NULL, NULL, NULL, NOW())`)
-    } else if (column === 'abf') {
-      values.push(`($1, $2, $3, $${params.length}::date, NULL, ${n}, NULL, NULL, NOW())`)
-    } else if (column === 'extrabed') {
-      values.push(`($1, $2, $3, $${params.length}::date, NULL, NULL, NULL, ${n}, NOW())`)
-    } else {
-      values.push(`($1, $2, $3, $${params.length}::date, NULL, NULL, ${n}, NULL, NOW())`)
-    }
+    values.push(`($1, $2, $3, $${params.length}::date, ${emptyRateTuple(column, n)}, NOW())`)
   })
-  const setCol = column === 'price'
-    ? 'price = EXCLUDED.price'
-    : column === 'abf'
-      ? 'abf = EXCLUDED.abf'
-      : column === 'extrabed'
-        ? 'extrabed = EXCLUDED.extrabed'
-        : 'display_price = EXCLUDED.display_price'
   await pool.query(
-    `INSERT INTO channel_rates (hotel_id, room_type_id, rate_plan_id, stay_date, price, abf, display_price, extrabed, updated_at)
+    `INSERT INTO channel_rates (
+       hotel_id, room_type_id, rate_plan_id, stay_date,
+       price, abf, display_price, extrabed, sell_rooms, display_rooms, updated_at
+     )
      VALUES ${values.join(', ')}
      ON CONFLICT (hotel_id, room_type_id, rate_plan_id, stay_date)
-     DO UPDATE SET ${setCol}, updated_at = NOW()`,
+     DO UPDATE SET ${column} = EXCLUDED.${column}, updated_at = NOW()`,
     params
   )
   return { updated: dates.length, column, value: n }
+}
+
+async function applyRoomCount(pool, hotelId, body, column) {
+  const {
+    mode, room_type_id, rate_plan_id, date_from, date_to, weekdays, rooms, action = 'set',
+  } = body || {}
+  const dates = datesForBulk(date_from, date_to, weekdays)
+  const pairs = await resolveStopSalePairs(pool, hotelId, mode, room_type_id, rate_plan_id)
+  const act = String(action || 'set').toLowerCase() === 'clear' ? 'clear' : 'set'
+  if (act === 'clear') {
+    for (const pair of pairs) {
+      await upsertRateColumn(pool, hotelId, pair.room_type_id, pair.rate_plan_id, dates, column, null)
+    }
+    return { action: 'clear', pairs: pairs.length, dates: dates.length, cleared: dates.length * pairs.length }
+  }
+  if (rooms === undefined || rooms === null || String(rooms).trim() === '') {
+    const err = new Error('กรอกจำนวนห้อง')
+    err.status = 400
+    throw err
+  }
+  const n = Number(rooms)
+  if (!Number.isInteger(n) || n < 0 || n > 9999) {
+    const err = new Error('จำนวนห้องต้องเป็นจำนวนเต็ม 0–9999')
+    err.status = 400
+    throw err
+  }
+  for (const pair of pairs) {
+    await upsertRateColumn(pool, hotelId, pair.room_type_id, pair.rate_plan_id, dates, column, n)
+  }
+  return { action: 'set', rooms: n, pairs: pairs.length, dates: dates.length, updated: dates.length * pairs.length }
 }
 
 function discountFromPrices(sell, display) {
@@ -722,7 +783,8 @@ async function getCalendar(pool, hotelId, { from, to, days }) {
     : { rows: [] }
   const rates = typeIds.length
     ? await pool.query(
-      `SELECT room_type_id, rate_plan_id, to_char(stay_date, 'YYYY-MM-DD') AS stay_date, price, abf, display_price, extrabed
+      `SELECT room_type_id, rate_plan_id, to_char(stay_date, 'YYYY-MM-DD') AS stay_date,
+              price, abf, display_price, extrabed, sell_rooms, display_rooms
        FROM channel_rates
        WHERE hotel_id = $1 AND room_type_id = ANY($2) AND stay_date BETWEEN $3::date AND $4::date`,
       [hotelId, typeIds, start, end]
@@ -746,6 +808,7 @@ async function getCalendar(pool, hotelId, { from, to, days }) {
   const abfMap = {}
   const extrabedMap = {}
   const displayMap = {}
+  const sellRoomsMap = {}
   const stopMap = {}
   for (const row of rates.rows) {
     const key = `${row.room_type_id}:${row.rate_plan_id}`
@@ -764,6 +827,10 @@ async function getCalendar(pool, hotelId, { from, to, days }) {
     if (row.display_price != null) {
       if (!displayMap[key]) displayMap[key] = {}
       displayMap[key][row.stay_date] = Number(row.display_price)
+    }
+    if (row.sell_rooms != null) {
+      if (!sellRoomsMap[key]) sellRoomsMap[key] = {}
+      sellRoomsMap[key][row.stay_date] = Number(row.sell_rooms)
     }
   }
   for (const row of stops.rows) {
@@ -785,6 +852,7 @@ async function getCalendar(pool, hotelId, { from, to, days }) {
       abf: abfMap[key] || {},
       extrabed: extrabedMap[key] || {},
       display_prices: displayMap[key] || {},
+      sell_rooms: sellRoomsMap[key] || {},
       stop_sale: stopMap[key] || {},
     })
   }
@@ -864,7 +932,7 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
     }
   }
   const rates = await pool.query(
-    `SELECT rate_plan_id, to_char(stay_date, 'YYYY-MM-DD') AS stay_date, price, abf, display_price, extrabed
+    `SELECT rate_plan_id, to_char(stay_date, 'YYYY-MM-DD') AS stay_date, price, abf, display_price, extrabed, display_rooms
      FROM channel_rates
      WHERE hotel_id = $1 AND room_type_id = $2
        AND rate_plan_id = ANY($3) AND stay_date = ANY($4::date[])`,
@@ -885,6 +953,7 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
       abf: row.abf == null ? null : Number(row.abf),
       extrabed: row.extrabed == null ? null : Number(row.extrabed),
       display_price: row.display_price == null ? null : Number(row.display_price),
+      display_rooms: row.display_rooms == null ? null : Number(row.display_rooms),
     }
   }
   const stopped = new Set(stops.rows.map((r) => `${r.rate_plan_id}:${r.stay_date}`))
@@ -892,6 +961,7 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
   let room = null
   let breakfast = null
   const listed = []
+  const displayCaps = []
   let stoppedPlanCount = 0
   for (const plan of plans.rows) {
     if (dates.some((d) => stopped.has(`${plan.id}:${d}`))) {
@@ -917,6 +987,8 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
     const displayAvg = hasFullDisplay && nights ? displayTotal / nights : null
     const roomAvg = roomTotal / nights
     const promo = hasFullDisplay ? discountFromPrices(roomAvg, displayAvg) : null
+    const roomCap = minSetDisplayRooms(nightly, dates)
+    if (roomCap != null) displayCaps.push(roomCap)
     const candidate = {
       id: plan.id,
       rate_plan_id: plan.id,
@@ -956,6 +1028,7 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
     plans: listed,
     channel_closed,
     linked_plans: plans.rows.length,
+    display_rooms_cap: displayCaps.length ? Math.min(...displayCaps) : null,
   }
 }
 
@@ -1083,6 +1156,10 @@ async function applyChannelToTypes(pool, hotelId, types, checkIn, checkOut) {
     type.abf_per_night = 0
     type.breakfast_available = type.rate_plans.some((p) => p.includes_breakfast)
     type.abf_per_person_per_night = quotes.breakfast?.abfAvg || 0
+    if (quotes.display_rooms_cap != null) {
+      type.available_count = capPublicRooms(type.available_count, quotes.display_rooms_cap)
+      type.display_rooms_cap = quotes.display_rooms_cap
+    }
   }
   return types.filter((t) => !t.channel_closed && (Number(t.available_count) || 0) > 0)
 }
@@ -1109,6 +1186,8 @@ module.exports = {
   upsertRateColumn,
   applyStopSale,
   applyDisplayPrice,
+  applyRoomCount,
+  capPublicRooms,
   getCalendar,
   getStayAllotmentCap,
   getChannelQuotes,

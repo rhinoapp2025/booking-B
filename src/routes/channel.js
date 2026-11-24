@@ -14,6 +14,7 @@ const {
   upsertRateColumn,
   applyStopSale,
   applyDisplayPrice,
+  applyRoomCount,
   getCalendar,
 } = require('../utils/channelManager')
 
@@ -143,6 +144,22 @@ router.put('/rates', async (req, res) => {
 router.post('/stop-sale', async (req, res) => {
   await withHotel(req, res, async (pool, hotel) => {
     const result = await applyStopSale(pool, hotel.id, req.body || {})
+    res.json(result)
+  })
+})
+
+/** จำนวนห้องขายต่อเรทแพลน — แสดงในแถวเรทแพลน; action: set | clear */
+router.post('/sell-rooms', async (req, res) => {
+  await withHotel(req, res, async (pool, hotel) => {
+    const result = await applyRoomCount(pool, hotel.id, req.body || {}, 'sell_rooms')
+    res.json(result)
+  })
+})
+
+/** จำนวนห้องที่หน้าจองแสดง — ไม่เกินห้องว่างจริง; action: set | clear */
+router.post('/display-rooms', async (req, res) => {
+  await withHotel(req, res, async (pool, hotel) => {
+    const result = await applyRoomCount(pool, hotel.id, req.body || {}, 'display_rooms')
     res.json(result)
   })
 })

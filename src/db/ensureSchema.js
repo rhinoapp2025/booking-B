@@ -511,6 +511,32 @@ async function ensureSchema() {
       ADD CONSTRAINT channel_rates_display_price_check
       CHECK (display_price IS NULL OR display_price >= 0)
   `)
+  await pool.query(`
+    ALTER TABLE channel_rates
+      ADD COLUMN IF NOT EXISTS sell_rooms SMALLINT
+  `)
+  await pool.query(`
+    ALTER TABLE channel_rates
+      DROP CONSTRAINT IF EXISTS channel_rates_sell_rooms_check
+  `)
+  await pool.query(`
+    ALTER TABLE channel_rates
+      ADD CONSTRAINT channel_rates_sell_rooms_check
+      CHECK (sell_rooms IS NULL OR (sell_rooms >= 0 AND sell_rooms <= 9999))
+  `)
+  await pool.query(`
+    ALTER TABLE channel_rates
+      ADD COLUMN IF NOT EXISTS display_rooms SMALLINT
+  `)
+  await pool.query(`
+    ALTER TABLE channel_rates
+      DROP CONSTRAINT IF EXISTS channel_rates_display_rooms_check
+  `)
+  await pool.query(`
+    ALTER TABLE channel_rates
+      ADD CONSTRAINT channel_rates_display_rooms_check
+      CHECK (display_rooms IS NULL OR (display_rooms >= 0 AND display_rooms <= 9999))
+  `)
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS channel_stop_sales (

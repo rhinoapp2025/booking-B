@@ -1842,6 +1842,83 @@ router.post('/:hotelSlug/pms-calendar/stop-sale', requireHotelAdmin, async (req,
   }
 })
 
+router.get('/:hotelSlug/pms-calendar/folio', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { getRoomFolio } = require('../utils/pmsBookingCalendar')
+    res.json(await getRoomFolio({ dbName: pms.dbName, roomNo: req.query.roomNo }))
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
+router.post('/:hotelSlug/pms-calendar/folio/charge', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { postFolioEntry } = require('../utils/pmsBookingCalendar')
+    res.json(await postFolioEntry({
+      dbName: pms.dbName,
+      hotelID: pms.hotelID,
+      roomNo: req.body?.roomNo,
+      userId: req.body?.userId,
+      kind: 'charge',
+      trnCode: req.body?.trnCode,
+      quantity: req.body?.quantity,
+      amount: req.body?.amount,
+      remark: req.body?.remark,
+    }))
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
+router.post('/:hotelSlug/pms-calendar/folio/payment', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { postFolioEntry } = require('../utils/pmsBookingCalendar')
+    res.json(await postFolioEntry({
+      dbName: pms.dbName,
+      hotelID: pms.hotelID,
+      roomNo: req.body?.roomNo,
+      userId: req.body?.userId,
+      kind: 'payment',
+      trnCode: req.body?.trnCode,
+      quantity: 1,
+      amount: req.body?.amount,
+      remark: req.body?.remark,
+      company: req.body?.company,
+    }))
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
+router.post('/:hotelSlug/pms-calendar/folio/checkout', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { checkoutRoomFolio } = require('../utils/pmsBookingCalendar')
+    res.json(await checkoutRoomFolio({
+      dbName: pms.dbName,
+      roomNo: req.body?.roomNo,
+      userId: req.body?.userId,
+    }))
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
 router.post('/:hotelSlug/pms-calendar/release', requireHotelAdmin, async (req, res) => {
   try {
     const pool = getPool()

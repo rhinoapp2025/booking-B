@@ -348,10 +348,222 @@ async function releaseSaleRoom({ dbName, roomNo, resvNo, ref, bussDate, userId }
   return { roomNo: room, resvNo: reservationNo }
 }
 
+function fail(message, status = 400) {
+  const error = new Error(message)
+  error.status = status
+  return error
+}
+
+function money(value) {
+  const n = Number(value)
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0
+}
+
+async function folioNoOf(pool, roomNo) {
+  const result = await pool.request()
+    .input('roomno', sql.VarChar(7), roomNo)
+    .query(`SELECT MAX(foliono) AS FoNo FROM dbo.folioname WHERE LTRIM(RTRIM(chargeroomno)) = @roomno`)
+  const folioNo = Number(result.recordset?.[0]?.FoNo)
+  return Number.isInteger(folioNo) && folioNo > 0 ? folioNo : null
+}
+
+async function folioBalance(pool, roomNo, folioNo) {
+  const result = await pool.request()
+    .input('roomno', sql.VarChar(7), roomNo)
+    .input('foliono', sql.Int, folioNo)
+    .input('adjust', sql.Int, 0)
+    .output('service', sql.Float, 0)
+    .output('tax', sql.Float, 0)
+    .output('amount', sql.Float, 0)
+    .execute('dbo.sp_get_subtotal')
+  return {
+    service: money(result.output.service),
+    tax: money(result.output.tax),
+    amount: money(result.output.amount),
+  }
+}
+
+async function folioLines(pool, roomNo, folioNo) {
+  try {
+    const result = await pool.request()
+      .input('roomno', sql.VarChar(7), roomNo)
+      .input('foliono', sql.Int, folioNo)
+      .query(`
+        SELECT TOP 40
+          CONVERT(varchar(16), F.DateTime, 120) AS postedAt,
+          LTRIM(RTRIM(F.Trans_Code)) AS code,
+          LTRIM(RTRIM(ISNULL(T.TrnName, F.Trans_Code))) AS name,
+          F.Qty AS qty,
+          F.Amount AS amount,
+          F.Charge_Type AS chargeType,
+          LTRIM(RTRIM(ISNULL(F.Remark, ''))) AS remark
+        FROM dbo.Front_Journal F
+        LEFT JOIN dbo.TrnCode T ON LTRIM(RTRIM(F.Trans_Code)) = LTRIM(RTRIM(T.TrnCode))
+        WHERE LTRIM(RTRIM(F.ChargeRoomNo)) = @roomno
+          AND F.FolioNo = @foliono
+          AND ISNULL(F.Adjust, 0) = 0
+          AND ISNULL(F.VOID, 0) = 0
+        ORDER BY F.DateTime DESC
+      `)
+    return (result.recordset || []).map((row) => ({
+      postedAt: row.postedAt,
+      code: trim(row.code),
+      name: trim(row.name),
+      qty: Number(row.qty) || 0,
+      amount: money(row.chargeType === -1 ? -Math.abs(row.amount) : row.amount),
+      remark: trim(row.remark),
+    }))
+  } catch {
+    return []
+  }
+}
+
+async function folioCatalog(pool) {
+  const [items, payments, companies] = await Promise.all([
+    pool.request().query(`
+      SELECT LTRIM(RTRIM(TrnCode)) AS code, LTRIM(RTRIM(TrnName)) AS name, TrnPrice1 AS price
+      FROM dbo.TrnCode
+      WHERE TrnGroupCode = '1' AND TrnCodeRecordStatus = 'Y' AND ISNULL(TrnCredit, 0) = 0
+      ORDER BY TrnCode
+    `),
+    pool.request().query(`
+      SELECT LTRIM(RTRIM(TrnCode)) AS code, LTRIM(RTRIM(TrnName)) AS name
+      FROM dbo.TrnCode
+      WHERE TrnCodeRecordStatus = 'Y' AND (TrnGrp = 9 OR ISNULL(TrnCredit, 0) = 1)
+      ORDER BY TrnCode
+    `),
+    pool.request().query(`
+      SELECT LTRIM(RTRIM(AgNum)) AS code, LTRIM(RTRIM(AgName)) AS name
+      FROM dbo.Agent
+      WHERE Status = 'A' AND Contact = 'Y'
+      ORDER BY AgName
+    `).catch(() => ({ recordset: [] })),
+  ])
+  const mapCode = (row) => ({ code: trim(row.code), name: trim(row.name), price: money(row.price) })
+  return {
+    charges: (items.recordset || []).map(mapCode).filter((row) => row.code),
+    payments: (payments.recordset || []).map(mapCode).filter((row) => row.code),
+    companies: (companies.recordset || []).map(mapCode).filter((row) => row.code),
+  }
+}
+
+async function getRoomFolio({ dbName, roomNo }) {
+  const room = trim(roomNo)
+  if (!room) throw fail('ไม่ได้ระบุห้อง')
+  const pool = await connectDynamicDB(dbName)
+  try {
+    const status = await pool.request()
+      .input('RmNum', sql.VarChar(7), room)
+      .query(`SELECT LTRIM(RTRIM(RmStatus)) AS RmStatus, ResvNo FROM dbo.RmSetupNum WHERE LTRIM(RTRIM(RmNum)) = @RmNum`)
+    const row = status.recordset?.[0]
+    if (!row) throw fail('ไม่พบห้องใน PMS', 404)
+    const inHouse = String(row.RmStatus || '').toUpperCase() === 'CI'
+    if (!inHouse) throw fail('ห้องนี้ไม่ได้เช็คอิน จึงเช็คเอาต์หรือลงรายการไม่ได้')
+    const folioNo = await folioNoOf(pool, room)
+    if (!folioNo) throw fail('ไม่พบโฟลิโอของห้องนี้')
+    const [balance, lines, catalog] = await Promise.all([
+      folioBalance(pool, room, folioNo),
+      folioLines(pool, room, folioNo),
+      folioCatalog(pool),
+    ])
+    return {
+      roomNo: room,
+      status: row.RmStatus,
+      resvNo: row.ResvNo != null ? String(row.ResvNo) : '',
+      folioNo,
+      balance,
+      lines,
+      ...catalog,
+      canCheckout: Math.abs(balance.amount) < 0.01,
+    }
+  } finally {
+    try { await pool.close() } catch { /* ignore */ }
+  }
+}
+
+async function postFolioEntry({ dbName, hotelID, roomNo, userId, kind, trnCode, quantity, amount, remark, company }) {
+  const room = trim(roomNo)
+  const code = trim(trnCode)
+  const user = trim(userId).slice(0, 20) || 'webadmin'
+  const qty = Math.max(1, Number(quantity) || 1)
+  const amt = money(amount)
+  if (!room || !code) throw fail('เลือกห้องและรายการก่อน')
+  if (amt < 0) throw fail('จำนวนเงินต้องไม่ติดลบ')
+  const pool = await connectDynamicDB(dbName)
+  try {
+    const status = await pool.request()
+      .input('RmNum', sql.VarChar(7), room)
+      .query(`SELECT LTRIM(RTRIM(RmStatus)) AS RmStatus FROM dbo.RmSetupNum WHERE LTRIM(RTRIM(RmNum)) = @RmNum`)
+    const rmStatus = String(status.recordset?.[0]?.RmStatus || '').toUpperCase()
+    if (rmStatus !== 'CI') throw fail('ห้องนี้ไม่ได้เช็คอิน')
+    const folioNo = await folioNoOf(pool, room)
+    if (!folioNo) throw fail('ไม่พบโฟลิโอของห้องนี้')
+    await pool.request()
+      .input('id', sql.Int, 0)
+      .input('roomno', sql.VarChar(7), room)
+      .input('foliono', sql.Int, folioNo)
+      .input('transcode', sql.VarChar(10), code)
+      .input('quantity', sql.Int, kind === 'payment' ? 1 : qty)
+      .input('ChgAmt', sql.Float, amt)
+      .input('userid', sql.VarChar(20), user)
+      .input('refno', sql.VarChar(30), '')
+      .input('remark', sql.VarChar(50), trim(remark).slice(0, 50) || ' ')
+      .input('ShiftNo', sql.Int, 1)
+      .input('AuditPost', sql.Int, 0)
+      .input('Reason', sql.VarChar(20), '')
+      .input('folioadjust', sql.Int, 0)
+      .input('vDeptPost', sql.Int, 4)
+      .input('CommAmt', sql.Float, kind === 'payment' ? amt : 0)
+      .input('CurrencyCode', sql.VarChar(5), '')
+      .input('CurrencyRate', sql.Float, 0)
+      .input('CurrencyAmount', sql.Float, kind === 'payment' ? amt : 0)
+      .input('VoucherNo', sql.VarChar(20), '')
+      .input('AgentCode', sql.VarChar(10), kind === 'payment' ? trim(company).slice(0, 10) : '')
+      .input('HotelId', sql.Int, Number(hotelID))
+      .execute('dbo.sp_save_journal')
+    return getRoomFolio({ dbName, roomNo: room })
+  } finally {
+    try { await pool.close() } catch { /* ignore */ }
+  }
+}
+
+async function checkoutRoomFolio({ dbName, roomNo, userId }) {
+  const room = trim(roomNo)
+  const user = trim(userId).slice(0, 20) || 'webadmin'
+  if (!room) throw fail('ไม่ได้ระบุห้อง')
+  const pool = await connectDynamicDB(dbName)
+  try {
+    const status = await pool.request()
+      .input('RmNum', sql.VarChar(7), room)
+      .query(`SELECT LTRIM(RTRIM(RmStatus)) AS RmStatus FROM dbo.RmSetupNum WHERE LTRIM(RTRIM(RmNum)) = @RmNum`)
+    if (String(status.recordset?.[0]?.RmStatus || '').toUpperCase() !== 'CI') {
+      throw fail('ห้องนี้ไม่ได้เช็คอิน จึงเช็คเอาต์ไม่ได้')
+    }
+    const folioNo = await folioNoOf(pool, room)
+    if (!folioNo) throw fail('ไม่พบโฟลิโอของห้องนี้')
+    const balance = await folioBalance(pool, room, folioNo)
+    if (Math.abs(balance.amount) >= 0.01) {
+      throw fail(`ยังมียอดค้าง ฿${balance.amount.toLocaleString()} ลงรายการชำระให้ครบก่อนเช็คเอาต์`)
+    }
+    await pool.request()
+      .input('foliono', sql.Int, folioNo)
+      .input('ShiftNo', sql.Int, 1)
+      .output('RoomOut', sql.SmallInt)
+      .input('UserId', sql.VarChar(20), user)
+      .execute('dbo.sp_folio_check_out')
+    return { roomNo: room, folioNo, checkedOut: true }
+  } finally {
+    try { await pool.close() } catch { /* ignore */ }
+  }
+}
+
 module.exports = {
   loadPmsBookingCalendar,
   stopSaleRoom,
   releaseSaleRoom,
+  getRoomFolio,
+  postFolioEntry,
+  checkoutRoomFolio,
   todayBangkok,
   addDays,
 }

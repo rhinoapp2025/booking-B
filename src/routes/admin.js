@@ -1854,7 +1854,7 @@ router.get('/:hotelSlug/pms-calendar/folio', requireHotelAdmin, async (req, res)
     if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
     const pms = await pmsConnection(pool, hotel)
     const { getRoomFolio } = require('../utils/pmsBookingCalendar')
-    res.json(await getRoomFolio({ dbName: pms.dbName, roomNo: req.query.roomNo }))
+    res.json(await getRoomFolio({ dbName: pms.dbName, hotelID: pms.hotelID, roomNo: req.query.roomNo }))
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message })
   }
@@ -1901,6 +1901,26 @@ router.post('/:hotelSlug/pms-calendar/folio/payment', requireHotelAdmin, async (
       amount: req.body?.amount,
       remark: req.body?.remark,
       company: req.body?.company,
+    }))
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
+router.post('/:hotelSlug/pms-calendar/folio/void', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { voidFolioLine } = require('../utils/pmsBookingCalendar')
+    res.json(await voidFolioLine({
+      dbName: pms.dbName,
+      hotelID: pms.hotelID,
+      roomNo: req.body?.roomNo,
+      userId: req.body?.userId,
+      recId: req.body?.recId,
+      reason: req.body?.reason,
     }))
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message })
@@ -1964,6 +1984,49 @@ router.post('/:hotelSlug/pms-calendar/checkin', requireHotelAdmin, async (req, r
     }))
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message, missing: err.missing })
+  }
+})
+
+// POST /api/admin/:hotelSlug/pms-calendar/booking — แก้ไขข้อมูลผู้เข้าพัก/การจอง (ไม่รวมวันที่ ห้อง ราคา)
+router.post('/:hotelSlug/pms-calendar/booking', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { updateReservationInfo } = require('../utils/pmsBookingCalendar')
+    res.json(await updateReservationInfo({
+      dbName: pms.dbName,
+      hotelID: pms.hotelID,
+      resvNo: req.body?.resvNo,
+      roomNo: req.body?.roomNo,
+      userId: req.body?.userId,
+      values: req.body?.values,
+    }))
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
+// POST /api/admin/:hotelSlug/pms-calendar/move — ลากย้ายการจองที่ยังไม่เช็คอินไปห้อง/วันใหม่
+router.post('/:hotelSlug/pms-calendar/move', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { moveReservation } = require('../utils/pmsBookingCalendar')
+    res.json(await moveReservation({
+      dbName: pms.dbName,
+      hotelID: pms.hotelID,
+      comNo: pms.comNo,
+      resvNo: req.body?.resvNo,
+      roomNo: req.body?.roomNo,
+      newRoomNo: req.body?.newRoomNo,
+      newArrival: req.body?.newArrival,
+    }))
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
   }
 })
 

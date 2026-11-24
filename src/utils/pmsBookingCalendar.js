@@ -238,6 +238,8 @@ function paintStay(room, stay, dates, today) {
         guest,
         resvNo,
         folioNo: stay.FolioNo != null ? String(stay.FolioNo) : '',
+        arrival: String(stay.FirstNight || '').slice(0, 10),
+        departure: depart,
         kind: 'history',
         source: 'folio',
       }
@@ -482,36 +484,50 @@ async function folioBalance(pool, roomNo, folioNo) {
   }
 }
 
-async function folioLines(pool, roomNo, folioNo) {
+async function folioLines(pool, roomNo, folioNo, sysDate) {
   try {
     const result = await pool.request()
       .input('roomno', sql.VarChar(7), roomNo)
       .input('foliono', sql.Int, folioNo)
       .query(`
-        SELECT TOP 40
+        SELECT TOP 100
+          F.RecID AS recId,
           CONVERT(varchar(16), F.DateTime, 120) AS postedAt,
+          CONVERT(varchar(10), ISNULL(F.Buss_Date, F.DateTime), 23) AS businessDate,
           LTRIM(RTRIM(F.Trans_Code)) AS code,
           LTRIM(RTRIM(ISNULL(T.TrnName, F.Trans_Code))) AS name,
           F.Qty AS qty,
           F.Amount AS amount,
           F.Charge_Type AS chargeType,
-          LTRIM(RTRIM(ISNULL(F.Remark, ''))) AS remark
+          ISNULL(F.Shift_No, 1) AS shiftNo,
+          LTRIM(RTRIM(ISNULL(F.Remark, ''))) AS remark,
+          LTRIM(RTRIM(ISNULL(F.Ref_No, ''))) AS refNo
         FROM dbo.Front_Journal F
         LEFT JOIN dbo.TrnCode T ON LTRIM(RTRIM(F.Trans_Code)) = LTRIM(RTRIM(T.TrnCode))
         WHERE LTRIM(RTRIM(F.ChargeRoomNo)) = @roomno
           AND F.FolioNo = @foliono
           AND ISNULL(F.Adjust, 0) = 0
           AND ISNULL(F.VOID, 0) = 0
-        ORDER BY F.DateTime DESC
+        ORDER BY F.DateTime DESC, F.RecID DESC
       `)
-    return (result.recordset || []).map((row) => ({
-      postedAt: row.postedAt,
-      code: trim(row.code),
-      name: trim(row.name),
-      qty: Number(row.qty) || 0,
-      amount: money(row.chargeType === -1 ? -Math.abs(row.amount) : row.amount),
-      remark: trim(row.remark),
-    }))
+    return (result.recordset || []).map((row) => {
+      const businessDate = String(row.businessDate || '').slice(0, 10)
+      return {
+        recId: Number(row.recId) || 0,
+        postedAt: row.postedAt,
+        businessDate,
+        code: trim(row.code),
+        name: trim(row.name),
+        qty: Number(row.qty) || 0,
+        amount: money(row.chargeType === -1 ? -Math.abs(row.amount) : row.amount),
+        isPayment: Number(row.chargeType) === -1,
+        shiftNo: Number(row.shiftNo) || 1,
+        remark: trim(row.remark),
+        refNo: trim(row.refNo),
+        // แคชเชียร์ PMS ยกเลิกได้เฉพาะรายการวันทำการปัจจุบัน
+        canVoid: Boolean(sysDate) && businessDate === sysDate && Number(row.recId) > 0,
+      }
+    })
   } catch {
     return []
   }
@@ -546,34 +562,71 @@ async function folioCatalog(pool) {
   }
 }
 
-async function getRoomFolio({ dbName, roomNo }) {
+async function businessDateOf(pool, hotelID) {
+  try {
+    const result = await pool.request()
+      .input('hotelID', sql.Int, Number(hotelID) || 0)
+      .query(`
+        SELECT TOP 1 CONVERT(varchar(10), ci.SysDate, 23) AS sys_date
+        FROM FRONT_OPTION fo
+        LEFT JOIN CustInfo ci ON ci.HotelID = fo.HotelID
+        WHERE (@hotelID = 0 OR fo.HotelID = @hotelID)
+      `)
+    const raw = result.recordset?.[0]?.sys_date
+    return raw ? String(raw).slice(0, 10) : todayBangkok()
+  } catch {
+    return todayBangkok()
+  }
+}
+
+async function getRoomFolio({ dbName, hotelID, roomNo }) {
   const room = trim(roomNo)
   if (!room) throw fail('ไม่ได้ระบุห้อง')
   const pool = await connectDynamicDB(dbName)
   try {
     const status = await pool.request()
       .input('RmNum', sql.VarChar(7), room)
-      .query(`SELECT LTRIM(RTRIM(RmStatus)) AS RmStatus, ResvNo FROM dbo.RmSetupNum WHERE LTRIM(RTRIM(RmNum)) = @RmNum`)
+      .query(`
+        SELECT
+          LTRIM(RTRIM(RmStatus)) AS RmStatus,
+          ResvNo,
+          LTRIM(RTRIM(ISNULL(RmGstName1, ''))) AS GuestName,
+          ISNULL(RmRateAmt, 0) AS RoomRate,
+          CONVERT(varchar(10), RmStatusStrDate, 23) AS ArrivalYmd,
+          CONVERT(varchar(10), RmStatusEndDate, 23) AS DeptYmd,
+          LTRIM(RTRIM(ISNULL(RmType, ''))) AS RoomType
+        FROM dbo.RmSetupNum
+        WHERE LTRIM(RTRIM(RmNum)) = @RmNum
+      `)
     const row = status.recordset?.[0]
     if (!row) throw fail('ไม่พบห้องใน PMS', 404)
     const inHouse = String(row.RmStatus || '').toUpperCase() === 'CI'
     if (!inHouse) throw fail('ห้องนี้ไม่ได้เช็คอิน จึงเช็คเอาต์หรือลงรายการไม่ได้')
     const folioNo = await folioNoOf(pool, room)
     if (!folioNo) throw fail('ไม่พบโฟลิโอของห้องนี้')
+    const sysDate = await businessDateOf(pool, hotelID)
     const [balance, lines, catalog] = await Promise.all([
       folioBalance(pool, room, folioNo),
-      folioLines(pool, room, folioNo),
+      folioLines(pool, room, folioNo, sysDate),
       folioCatalog(pool),
     ])
+    const amount = money(balance.amount)
     return {
       roomNo: room,
       status: row.RmStatus,
       resvNo: row.ResvNo != null ? String(row.ResvNo) : '',
       folioNo,
-      balance,
+      guestName: trim(row.GuestName),
+      roomType: trim(row.RoomType),
+      rate: money(row.RoomRate),
+      arrival: String(row.ArrivalYmd || '').slice(0, 10),
+      departure: String(row.DeptYmd || '').slice(0, 10),
+      sysDate,
+      balance: { ...balance, amount },
       lines,
       ...catalog,
-      canCheckout: Math.abs(balance.amount) < 0.01,
+      canCheckout: Math.abs(amount) < 0.01,
+      overpaid: amount < -0.01,
     }
   } finally {
     try { await pool.close() } catch { /* ignore */ }
@@ -620,7 +673,61 @@ async function postFolioEntry({ dbName, hotelID, roomNo, userId, kind, trnCode, 
       .input('AgentCode', sql.VarChar(10), kind === 'payment' ? trim(company).slice(0, 10) : '')
       .input('HotelId', sql.Int, Number(hotelID))
       .execute('dbo.sp_save_journal')
-    return getRoomFolio({ dbName, roomNo: room })
+    return getRoomFolio({ dbName, hotelID, roomNo: room })
+  } finally {
+    try { await pool.close() } catch { /* ignore */ }
+  }
+}
+
+/** ยกเลิกรายการโฟลิโอแบบแคชเชียร์ PMS (sp_void_journal)
+ * ยกเลิกได้เฉพาะรายการวันทำการปัจจุบันที่ยังไม่ void
+ */
+async function voidFolioLine({ dbName, hotelID, roomNo, userId, recId, reason }) {
+  const room = trim(roomNo)
+  const user = trim(userId).slice(0, 20) || 'webadmin'
+  const id = Number(recId)
+  const why = trim(reason).slice(0, 50) || 'ยกเลิกจากปฏิทิน'
+  if (!room || !Number.isInteger(id) || id <= 0) throw fail('เลือกรายการที่จะยกเลิกก่อน')
+  const pool = await connectDynamicDB(dbName)
+  try {
+    const status = await pool.request()
+      .input('RmNum', sql.VarChar(7), room)
+      .query(`SELECT LTRIM(RTRIM(RmStatus)) AS RmStatus FROM dbo.RmSetupNum WHERE LTRIM(RTRIM(RmNum)) = @RmNum`)
+    if (String(status.recordset?.[0]?.RmStatus || '').toUpperCase() !== 'CI') {
+      throw fail('ห้องนี้ไม่ได้เช็คอิน')
+    }
+    const folioNo = await folioNoOf(pool, room)
+    if (!folioNo) throw fail('ไม่พบโฟลิโอของห้องนี้')
+    const sysDate = await businessDateOf(pool, hotelID)
+    const line = await pool.request()
+      .input('RecID', sql.Int, id)
+      .input('RoomNo', sql.VarChar(7), room)
+      .input('FolioNo', sql.Int, folioNo)
+      .query(`
+        SELECT TOP 1
+          F.RecID AS recId,
+          CONVERT(varchar(10), ISNULL(F.Buss_Date, F.DateTime), 23) AS businessDate,
+          ISNULL(F.VOID, 0) AS voided,
+          ISNULL(F.Shift_No, 1) AS shiftNo
+        FROM dbo.Front_Journal F
+        WHERE F.RecID = @RecID
+          AND LTRIM(RTRIM(F.ChargeRoomNo)) = @RoomNo
+          AND F.FolioNo = @FolioNo
+      `)
+    const row = line.recordset?.[0]
+    if (!row) throw fail('ไม่พบรายการในโฟลิโอนี้', 404)
+    if (Number(row.voided)) throw fail('รายการนี้ถูกยกเลิกไปแล้ว')
+    if (String(row.businessDate || '').slice(0, 10) !== sysDate) {
+      throw fail('ยกเลิกได้เฉพาะรายการของวันทำการปัจจุบัน เหมือนแคชเชียร์ PMS')
+    }
+    const result = await pool.request()
+      .input('id', sql.Int, id)
+      .input('UserEdit', sql.VarChar(20), user)
+      .input('Reason', sql.VarChar(50), why)
+      .input('ShiftNo', sql.Int, Number(row.shiftNo) || 1)
+      .execute('sp_void_journal')
+    if (!(result.rowsAffected?.[0] > 0)) throw fail('ยกเลิกรายการไม่สำเร็จ')
+    return getRoomFolio({ dbName, hotelID, roomNo: room })
   } finally {
     try { await pool.close() } catch { /* ignore */ }
   }
@@ -641,8 +748,11 @@ async function checkoutRoomFolio({ dbName, roomNo, userId }) {
     const folioNo = await folioNoOf(pool, room)
     if (!folioNo) throw fail('ไม่พบโฟลิโอของห้องนี้')
     const balance = await folioBalance(pool, room, folioNo)
-    if (Math.abs(balance.amount) >= 0.01) {
+    if (balance.amount > 0.009) {
       throw fail(`ยังมียอดค้าง ฿${balance.amount.toLocaleString()} ลงรายการชำระให้ครบก่อนเช็คเอาต์`)
+    }
+    if (balance.amount < -0.009) {
+      throw fail(`มียอดเกินชำระ ฿${Math.abs(balance.amount).toLocaleString()} ยกเลิกรายการชำระส่วนเกินก่อนเช็คเอาต์`)
     }
     await pool.request()
       .input('foliono', sql.Int, folioNo)
@@ -701,13 +811,18 @@ async function lookupList(pool, query) {
 }
 
 async function checkInLookups(pool) {
-  const [nation, market, source, guestType, guestLevel, paidBy] = await Promise.all([
+  const [nation, market, source, guestType, guestLevel, paidBy, agent, roomType, roomFeature, title, resvStatus] = await Promise.all([
     lookupList(pool, 'SELECT NationalityCode AS code, NationalityName AS name FROM Nationality ORDER BY NationalityName'),
     lookupList(pool, 'SELECT MarketCode AS code, MarketName AS name FROM MarketCode ORDER BY MarketName'),
     lookupList(pool, 'SELECT BusinessCode AS code, BusinessName AS name FROM BusinessSource ORDER BY BusinessName'),
     lookupList(pool, 'SELECT GstType AS code, GstTypeName AS name FROM GstType ORDER BY GstTypeName'),
     lookupList(pool, 'SELECT GstStatusCode AS code, GstStatusName AS name FROM GstLevel ORDER BY GstStatusName'),
     lookupList(pool, `SELECT TrnCode AS code, TrnName AS name FROM TrnCode WHERE TrnDeposit = 'Y' ORDER BY TrnCode`),
+    lookupList(pool, 'SELECT AgNum AS code, AgName AS name FROM Agent ORDER BY AgName'),
+    lookupList(pool, 'SELECT RmTpCode AS code, RmTpName AS name FROM RmType ORDER BY RmTpName'),
+    lookupList(pool, 'SELECT Code AS code, Name AS name FROM RoomFeature ORDER BY Name'),
+    lookupList(pool, 'SELECT TitleName AS code, TitleName AS name FROM TitleName ORDER BY TitleName'),
+    lookupList(pool, 'SELECT RsStatusCode AS code, RsStatusName AS name FROM RsStatusDetail ORDER BY RsStatusCode'),
   ])
   let defaults = {}
   let times = {}
@@ -734,7 +849,23 @@ async function checkInLookups(pool) {
     roomChargeCode = trim(row.RoomCharge)
   } catch { /* ไม่มีค่ามัดจำคีย์การ์ด */ }
   return {
-    options: { nation, market, source, guestType, guestLevel },
+    options: {
+      nation,
+      market,
+      source,
+      guestType,
+      guestLevel,
+      paidBy,
+      agent,
+      roomType,
+      roomFeature,
+      title,
+      resvStatus,
+      sex: [
+        { code: 'male', name: 'ชาย' },
+        { code: 'female', name: 'หญิง' },
+      ],
+    },
     paidBy,
     defaults,
     times,
@@ -849,8 +980,14 @@ async function getCheckInInfo({ dbName, hotelID, resvNo, roomNo }) {
       guests: context.rows.length,
       pending: context.pending.length,
       sysDate: context.sysDate,
+      checkedIn: mainCheckedIn,
       canCheckIn: !context.block,
       blockReason: context.block,
+      edit: {
+        allowed: !editBlock(context),
+        reason: editBlock(context),
+        fields: editableFields(main, lookups),
+      },
       missing: missingCheckInFields(main).map((field) => ({
         key: field.key,
         label: field.label,
@@ -1108,15 +1245,502 @@ async function checkInReservation({ dbName, hotelID, resvNo, roomNo, userId, fil
   }
 }
 
+// ฟิลด์ที่แก้ได้จากปฏิทิน เท่ากับหน้า Individual Check-In ของ PMS (บันทึกด้วย Sp_ReservationAppend)
+// lockWhenCi = ช่องที่ PMS ปิดหลังเช็คอิน (ห้อง ประเภทห้อง มัดจำ ฯลฯ) — ชื่อยังแก้ได้เหมือน PMS
+const EDIT_FIELDS = [
+  { key: 'arrival', column: 'ArrivalYmd', label: 'วันเช็คอิน', type: 'date', group: 'stay', scope: 'booking', required: true },
+  { key: 'departure', column: 'DeptYmd', label: 'วันเช็คเอาต์', type: 'date', group: 'stay', scope: 'booking', required: true },
+  { key: 'arrivalTime', column: 'ArrivalHms', label: 'เวลาเข้า', type: 'time', group: 'stay', scope: 'booking', size: 8 },
+  { key: 'departureTime', column: 'DeptHms', label: 'เวลาออก', type: 'time', group: 'stay', scope: 'booking', size: 8 },
+  { key: 'roomNo', column: 'RoomNo', label: 'เลขห้อง', type: 'text', group: 'stay', scope: 'booking', size: 7, lockWhenCi: true, required: true },
+  { key: 'roomType', column: 'RoomType', label: 'ประเภทห้อง', type: 'select', group: 'stay', scope: 'booking', size: 5, lockWhenCi: true, required: true },
+  { key: 'roomFeature', column: 'RoomFeature', label: 'คุณสมบัติห้อง', type: 'select', group: 'stay', scope: 'booking', size: 20, lockWhenCi: true },
+  { key: 'resvStatus', column: 'ResvStatus', label: 'สถานะจอง', type: 'select', group: 'stay', scope: 'booking', size: 3 },
+  { key: 'title', column: 'GstTitle', label: 'คำนำหน้า', type: 'select', group: 'guest', scope: 'guest', size: 16 },
+  { key: 'firstName', column: 'GstFName', label: 'ชื่อ', type: 'text', group: 'guest', scope: 'guest', size: 30, required: true },
+  { key: 'lastName', column: 'GstLName', label: 'นามสกุล', type: 'text', group: 'guest', scope: 'guest', size: 30 },
+  { key: 'sex', column: 'Sex', label: 'เพศ', type: 'select', group: 'guest', scope: 'guest', size: 8 },
+  { key: 'birthday', column: 'Birthday', label: 'วันเกิด', type: 'date', group: 'guest', scope: 'guest' },
+  { key: 'nation', column: 'GstNation', label: 'สัญชาติ', type: 'select', group: 'guest', scope: 'guest', size: 3, required: true },
+  { key: 'cardId', column: 'NationCardId', label: 'เลขบัตรประชาชน', type: 'text', group: 'guest', scope: 'guest', size: 16 },
+  { key: 'passport', column: 'GstPassPortNo', label: 'พาสปอร์ต', type: 'text', group: 'guest', scope: 'guest', size: 30 },
+  { key: 'phone', column: 'TelNo', label: 'เบอร์โทร', type: 'text', group: 'guest', scope: 'guest', size: 24 },
+  { key: 'email', column: 'EMAIL', label: 'อีเมล', type: 'text', group: 'guest', scope: 'guest', size: 64 },
+  { key: 'address1', column: 'HomeAddress1', label: 'ที่อยู่ 1', type: 'text', group: 'guest', scope: 'guest', size: 64 },
+  { key: 'address2', column: 'HomeAddress2', label: 'ที่อยู่ 2', type: 'text', group: 'guest', scope: 'guest', size: 64 },
+  { key: 'address3', column: 'HomeAddress3', label: 'ที่อยู่ 3', type: 'text', group: 'guest', scope: 'guest', size: 64 },
+  { key: 'agent', column: 'GstAgent', label: 'เอเจนต์', type: 'select', group: 'codes', scope: 'booking', size: 10 },
+  { key: 'voucher', column: 'VoucherNo', label: 'เลขวอยเชอร์', type: 'text', group: 'codes', scope: 'booking', size: 25 },
+  { key: 'market', column: 'GstMarketCode', label: 'ตลาดลูกค้า', type: 'select', group: 'codes', scope: 'booking', size: 5, required: true },
+  { key: 'source', column: 'GstBusSource', label: 'แหล่งที่มา', type: 'select', group: 'codes', scope: 'booking', size: 5, required: true },
+  { key: 'guestType', column: 'GstType', label: 'ประเภทลูกค้า', type: 'select', group: 'codes', scope: 'booking', size: 3, required: true },
+  { key: 'guestLevel', column: 'GstLevel', label: 'ระดับลูกค้า', type: 'select', group: 'codes', scope: 'booking', size: 3, required: true },
+  { key: 'adults', column: 'GstAdult', label: 'ผู้ใหญ่', type: 'number', group: 'rate', scope: 'booking', min: 1 },
+  { key: 'children', column: 'GstChildren', label: 'เด็ก', type: 'number', group: 'rate', scope: 'booking', min: 0 },
+  { key: 'rate', column: 'RoomRateAmt', label: 'ราคาห้อง / คืน', type: 'money', group: 'rate', scope: 'booking', min: 0 },
+  { key: 'abfAdult', column: 'AbfAdult', label: 'จำนวน ABF ผู้ใหญ่', type: 'number', group: 'rate', scope: 'booking', min: 0 },
+  { key: 'abfAmt', column: 'AbfAmt', label: 'ราคา ABF ผู้ใหญ่', type: 'money', group: 'rate', scope: 'booking', min: 0 },
+  { key: 'abfChild', column: 'QtyAbfChild', label: 'จำนวน ABF เด็ก', type: 'number', group: 'rate', scope: 'booking', min: 0 },
+  { key: 'abfChildAmt', column: 'AbfChildAmt', label: 'ราคา ABF เด็ก', type: 'money', group: 'rate', scope: 'booking', min: 0 },
+  { key: 'paidBy', column: 'PaymentType', label: 'Paid by', type: 'select', group: 'payment', scope: 'booking', size: 5, lockWhenCi: true },
+  { key: 'deposit', column: 'DepositAmt', label: 'มัดจำห้อง', type: 'money', group: 'payment', scope: 'booking', min: 0, lockWhenCi: true },
+  { key: 'depositKey', column: 'DepositKeyAmt', label: 'มัดจำคีย์การ์ด', type: 'money', group: 'payment', scope: 'booking', min: 0, lockWhenCi: true },
+  { key: 'reference', column: 'Reference', label: 'อ้างอิง', type: 'text', group: 'payment', scope: 'booking', size: 40, lockWhenCi: true },
+  { key: 'chargeTo', column: 'Chargeto', label: 'Charge to', type: 'text', group: 'payment', scope: 'booking', size: 32 },
+  { key: 'creditLimit', column: 'CreditLimit', label: 'วงเงินเครดิต', type: 'money', group: 'payment', scope: 'booking', min: 0 },
+  { key: 'memo', column: 'Memo1', label: 'หมายเหตุ', type: 'textarea', group: 'note', scope: 'booking', size: 255 },
+  { key: 'memo2', column: 'Memo2', label: 'หมายเหตุ 2', type: 'textarea', group: 'note', scope: 'booking', size: 255 },
+]
+
+function isCheckedIn(row) {
+  return trim(row?.Status).toUpperCase() === 'CI'
+}
+
+function editBlock(context) {
+  const { main, rows, room } = context
+  if (rows.some((row) => isGroupResv(row.GroupResv))) return 'การจองแบบกรุ๊ป กรุณาแก้ไขจาก PMS'
+  if (roomKey(main.RoomNo) !== roomKey(room)) return `การจองนี้ไม่ได้ผูกกับห้อง ${room}`
+  if (trim(main.ResvStatus).toUpperCase() === 'CXL') return 'การจองนี้ถูกยกเลิกแล้ว'
+  return ''
+}
+
+function nightsBetween(from, to) {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000)
+}
+
+function thaiDate(ymd) {
+  return `${ymd.slice(8)}/${ymd.slice(5, 7)}/${ymd.slice(0, 4)}`
+}
+
+function fieldCurrent(main, field) {
+  if (field.type === 'number') return Number(main[field.column]) || 0
+  if (field.type === 'money') return money(main[field.column])
+  if (field.key === 'birthday') {
+    const value = main.Birthday
+    if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10)
+    const text = String(value || '').slice(0, 10)
+    return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ''
+  }
+  return trim(main[field.column])
+}
+
+function editableFields(main, lookups) {
+  const checkedIn = isCheckedIn(main)
+  return EDIT_FIELDS.map((field) => ({
+    key: field.key,
+    label: field.label,
+    type: field.type,
+    group: field.group,
+    size: field.size || null,
+    min: field.min != null ? field.min : null,
+    required: Boolean(field.required),
+    locked: Boolean(field.lockWhenCi) && checkedIn,
+    options: field.type === 'select' ? lookups.options[field.key] || [] : null,
+    value: fieldCurrent(main, field),
+  }))
+}
+
+function normalizeTime(value) {
+  const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/)
+  if (!match) return ''
+  const hour = Number(match[1])
+  const minute = Number(match[2])
+  const second = Number(match[3] || 0)
+  if (hour > 23 || minute > 59 || second > 59) return ''
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
+}
+
+async function assertRoomVacant(pool, { hotelID, roomNo, arrival, departure, resvNo }) {
+  const room = trim(roomNo).toUpperCase()
+  const exists = await pool.request()
+    .input('RoomNo', sql.VarChar(7), room)
+    .input('HotelId', sql.Int, Number(hotelID))
+    .query(`
+      SELECT TOP 1 LTRIM(RTRIM(RmNum)) AS RoomNo, LTRIM(RTRIM(RmType)) AS RoomType, LTRIM(RTRIM(RmFeature)) AS RoomFeature
+      FROM RmSetupNum WHERE LTRIM(RTRIM(RmNum)) = @RoomNo AND HotelID = @HotelId
+    `)
+  const setup = exists.recordset?.[0]
+  if (!setup) throw fail(`ไม่พบห้อง ${room} ใน PMS`)
+
+  // เงื่อนไขเดียวกับ checkRoomVacant ของ PMS: มีการจองอื่นในห้องนี้ที่ยังไม่ออก และวันออกช้ากว่าวันเข้าใหม่
+  const conflict = await pool.request()
+    .input('ResvNo', sql.Int, Number(resvNo))
+    .input('RoomNo', sql.VarChar(7), room)
+    .input('Arrival', sql.DateTime, dateParam(arrival))
+    .input('Departure', sql.DateTime, dateParam(departure))
+    .query(`
+      SELECT TOP 1 ResvNo, LTRIM(RTRIM(RoomNo)) AS RoomNo,
+        CONVERT(varchar(10), ArrivalDate, 23) AS ArrivalYmd,
+        CONVERT(varchar(10), DeptDate, 23) AS DeptYmd,
+        LTRIM(RTRIM(Status)) AS Status
+      FROM Reservation
+      WHERE ResvNo <> @ResvNo
+        AND RoomCount = 1
+        AND LTRIM(RTRIM(RoomNo)) = @RoomNo
+        AND ResvStatus <> 'CXL'
+        AND Status <> 'CO'
+        AND ArrivalDate < @Departure
+        AND DeptDate > @Arrival
+      ORDER BY ArrivalDate
+    `)
+  const row = conflict.recordset?.[0]
+  if (row) {
+    throw fail(`ห้อง ${room} ไม่ว่าง ${thaiDate(row.ArrivalYmd)} → ${thaiDate(row.DeptYmd)} (เลขจอง ${row.ResvNo})`)
+  }
+  return setup
+}
+
+function ymdOf(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10)
+  const text = String(value || '').slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ''
+}
+
+// บันทึกแบบ PMS: ส่งแถวปัจจุบันทั้งหมดเข้า Sp_ReservationAppend (RecState=2) แล้วทับเฉพาะช่องที่แก้
+async function appendReservation(pool, guest, patch, { hotelID, user }) {
+  const arrival = patch.ArrivalYmd || ymdOf(guest.ArrivalDate) || trim(guest.ArrivalYmd)
+  const departure = patch.DeptYmd || ymdOf(guest.DeptDate) || trim(guest.DeptYmd)
+  const arrivalHms = patch.ArrivalHms || hmsOf(guest.ArrivalTime) || trim(guest.ArrivalHms) || '14:00:00'
+  const departureHms = patch.DeptHms || hmsOf(guest.DeptTime) || trim(guest.DeptHms) || '12:00:00'
+  const nights = arrival && departure ? Math.max(1, nightsBetween(arrival, departure)) : Number(guest.StayDay) || 0
+  const birthday = Object.prototype.hasOwnProperty.call(patch, 'Birthday')
+    ? (patch.Birthday ? dateParam(patch.Birthday) : null)
+    : (guest.Birthday instanceof Date && !Number.isNaN(guest.Birthday.getTime()) ? guest.Birthday : null)
+  const value = (column, fallback = '') => (
+    Object.prototype.hasOwnProperty.call(patch, column) ? patch[column] : (guest[column] ?? fallback)
+  )
+  const text = (column, fallback = '') => trim(value(column, fallback))
+  const num = (column, fallback = 0) => {
+    const raw = value(column, fallback)
+    const n = Number(raw)
+    return Number.isFinite(n) ? n : fallback
+  }
+
+  await pool.request()
+    .input('RecState', sql.Int, 2)
+    .input('ResvNo', sql.Int, Number(guest.ResvNo))
+    .input('OTABookingNo', sql.VarChar(20), text('OTABookingNo'))
+    .input('GstNo', sql.Int, Number(guest.GstNo))
+    .input('ResvDate', sql.DateTime, guest.ResvDate || null)
+    .input('GstFName', sql.VarChar(30), text('GstFName'))
+    .input('GstLName', sql.VarChar(30), text('GstLName'))
+    .input('GStTitle', sql.VarChar(16), text('GstTitle'))
+    .input('GstNation', sql.VarChar(3), text('GstNation'))
+    .input('GstAgent', sql.VarChar(10), text('GstAgent'))
+    .input('GstType', sql.VarChar(3), text('GstType'))
+    .input('GstLevel', sql.VarChar(3), text('GstLevel'))
+    .input('GstBusSource', sql.VarChar(5), text('GstBusSource'))
+    .input('GstMarketCode', sql.VarChar(5), text('GstMarketCode'))
+    .input('ResvType', sql.VarChar(3), text('ResvType', ' '))
+    .input('ResvStatus', sql.VarChar(3), text('ResvStatus'))
+    .input('GstAdult', sql.Int, num('GstAdult'))
+    .input('GstChildren', sql.SmallInt, num('GstChildren'))
+    .input('StayDay', sql.SmallInt, nights)
+    .input('ArrivalDate', sql.DateTime, dateParam(arrival))
+    .input('ArrivalTime', sql.DateTime, timeParam(arrivalHms))
+    .input('ArrivalBy', sql.VarChar(2), text('ArrivalBy', ' '))
+    .input('ArrivalFlgDetail', sql.VarChar(10), text('ArrivalFlgDetail', ' '))
+    .input('ArrServiceBy', sql.VarChar(3), text('ArrServiceBy', ' '))
+    .input('DeptDate', sql.DateTime, dateParam(departure))
+    .input('DeptTime', sql.DateTime, timeParam(departureHms))
+    .input('DeptBy', sql.VarChar(2), text('DeptBy', ' '))
+    .input('DeptFlgDetail', sql.VarChar(10), text('DeptFlgDetail', ' '))
+    .input('DeptServiceBy', sql.VarChar(3), text('DeptServiceBy', ' '))
+    .input('RoomCount', sql.SmallInt, Number(guest.RoomCount) === 1 ? 1 : 0)
+    .input('RoomType', sql.VarChar(5), text('RoomType'))
+    .input('RoomRateCode', sql.VarChar(7), text('RoomRateCode', ' '))
+    .input('RoomRateAmt', sql.Float, num('RoomRateAmt'))
+    .input('RoomFeature', sql.VarChar(20), text('RoomFeature'))
+    .input('RoomNo', sql.VarChar(7), text('RoomNo'))
+    .input('DepositAmt', sql.Float, num('DepositAmt'))
+    .input('PaymentType', sql.VarChar(5), text('PaymentType'))
+    .input('CreditLimit', sql.Float, num('CreditLimit'))
+    .input('Reference', sql.VarChar(40), text('Reference'))
+    .input('CardApprove', sql.VarChar(10), text('CardApprove', ' '))
+    .input('CardExpire', sql.DateTime, guest.CardExpire || null)
+    .input('GstHistory', sql.VarChar(1), text('GstHistory', 'Y'))
+    .input('Comp', sql.VarChar(1), text('Comp', 'N'))
+    .input('Memo1', sql.VarChar(255), text('Memo1'))
+    .input('Memo2', sql.VarChar(255), text('Memo2'))
+    .input('User', sql.VarChar(20), user)
+    .input('Date', sql.DateTime, new Date())
+    .input('ResvName', sql.VarChar(48), text('ResvName'))
+    .input('GstPassPortNo', sql.VarChar(30), text('GstPassPortNo'))
+    .input('yyyyBirthday', sql.VarChar(4), text('yyyyBirthday', ' '))
+    .input('Sex', sql.VarChar(8), text('Sex'))
+    .input('Visa', sql.VarChar(32), text('Visa', ' '))
+    .input('visaBgDate', sql.DateTime, guest.visaBgDate || null)
+    .input('visaenddate', sql.DateTime, guest.visaenddate || null)
+    .input('tmno', sql.VarChar(32), text('tmno', ' '))
+    .input('PointOfEntry', sql.VarChar(10), text('PointOfEntry', ' '))
+    .input('add1', sql.VarChar(64), text('Address1'))
+    .input('add2', sql.VarChar(64), text('Address2'))
+    .input('add3', sql.VarChar(64), text('Address3'))
+    .input('AbfAmt', sql.Float, num('AbfAmt'))
+    .input('ExtraBed', sql.Float, num('ExtraBed'))
+    .input('Telno', sql.VarChar(24), text('TelNo'))
+    .input('Email', sql.VarChar(64), text('EMAIL'))
+    .input('Company', sql.VarChar(100), text('Company'))
+    .input('Birthday', sql.DateTime, birthday)
+    .input('Chargeto', sql.VarChar(32), text('Chargeto'))
+    .input('PrnRate', sql.VarChar(1), text('PrnRate', 'N'))
+    .input('ArrCount', sql.Int, num('ArrCount'))
+    .input('AmtUsed', sql.Float, num('AmtUsed'))
+    .input('Memo3', sql.VarChar(255), text('Memo3'))
+    .input('AuthAmt', sql.Float, num('AuthAmt'))
+    .input('AuthPaidBy', sql.VarChar(5), text('AuthPaidBy', ' '))
+    .input('AuthRef', sql.VarChar(32), text('AuthRef', ' '))
+    .input('GstPictName', sql.VarChar(32), text('GstPictName'))
+    .input('FileImage', sql.VarChar(50), text('FileImage'))
+    .input('RegistNo', sql.VarChar(10), text('RegistNo', ' '))
+    .input('HomeAdd1', sql.VarChar(64), text('HomeAddress1'))
+    .input('HomeAdd2', sql.VarChar(64), text('HomeAddress2'))
+    .input('HomeAdd3', sql.VarChar(64), text('HomeAddress3'))
+    .input('FolioPrintNo', sql.SmallInt, Number(guest.FolioPrintNo) || 1)
+    .input('SaleID', sql.VarChar(20), text('SaleID', ' '))
+    .input('Rackrate', sql.Float, num('RackRate'))
+    .input('DiscPecent', sql.Int, num('DiscountPercent') || num('DiscPecent'))
+    .input('DiscBaht', sql.Float, num('DiscountBaht') || num('DiscBaht'))
+    .input('AbfAdult', sql.Int, num('AbfAdult'))
+    .input('QtyAbfChild', sql.Int, num('QtyAbfChild'))
+    .input('AbfChildAmt', sql.Float, num('AbfChildAmt'))
+    .input('ExtraBedCount', sql.Int, num('ExtraBedCount'))
+    .input('BabyCotCount', sql.SmallInt, num('BabyCotCount'))
+    .input('BabyCotAmt', sql.Float, num('BabyCotAmt'))
+    .input('ExtraBedAbfAmt', sql.Float, num('ExtraBedAbfAmt'))
+    .input('BabyCotAbfAmt', sql.Float, num('BabyCotAbfAmt'))
+    .input('ShiftNo', sql.SmallInt, 1)
+    .input('TaxId', sql.VarChar(32), text('TaxId'))
+    .input('CarId', sql.VarChar(16), text('CarNo') || text('CarId'))
+    .input('VoucherNo', sql.VarChar(25), text('VoucherNo'))
+    .input('DepositKeyAmt', sql.Float, num('DepositKeyAmt'))
+    .input('NationCardID', sql.VarChar(16), text('NationCardId'))
+    .input('HotelId', sql.Int, Number(guest.HotelId) || Number(hotelID))
+    .execute('Sp_ReservationAppend')
+}
+
+/**
+ * แก้ไขข้อมูลการจองจากปฏิทิน เท่าที่ PMS แก้ได้
+ * เขียนเฉพาะช่องที่ค่าเปลี่ยน แล้วบันทึกผ่าน Sp_ReservationAppend เหมือนปุ่ม Save ของ PMS
+ */
+async function updateReservationInfo({ dbName, hotelID, resvNo, roomNo, userId, values }) {
+  const input = values && typeof values === 'object' ? values : {}
+  const user = trim(userId).slice(0, 20) || 'webadmin'
+  const pool = await connectDynamicDB(dbName)
+  try {
+    const context = await loadCheckInContext(pool, { dbName, hotelID, resvNo, roomNo })
+    const block = editBlock(context)
+    if (block) throw fail(block)
+    const lookups = await checkInLookups(pool)
+    const { main, rows, reservationNo, sysDate } = context
+    const checkedIn = isCheckedIn(main) || rows.some(isCheckedIn)
+
+    const changes = []
+    for (const field of EDIT_FIELDS) {
+      if (!(field.key in input)) continue
+      const current = fieldCurrent(main, field)
+      let next
+      if (field.type === 'number') {
+        next = Math.floor(Number(input[field.key]))
+        if (next === current) continue
+        if (!Number.isFinite(next) || next < field.min || next > 99) {
+          throw fail(`${field.label} ต้องอยู่ระหว่าง ${field.min}–99`)
+        }
+      } else if (field.type === 'money') {
+        next = money(input[field.key])
+        if (next === current) continue
+        if (!(next >= field.min)) throw fail(`${field.label} ต้องไม่ติดลบ`)
+      } else if (field.type === 'date') {
+        next = trim(input[field.key]).slice(0, 10)
+        if (next === current) continue
+        if (next && !/^\d{4}-\d{2}-\d{2}$/.test(next)) throw fail(`${field.label} ไม่ถูกต้อง`)
+        if (!next && field.required) throw fail(`${field.label} ห้ามเว้นว่าง`)
+      } else if (field.type === 'time') {
+        next = normalizeTime(input[field.key])
+        if ((next || '') === (normalizeTime(current) || current)) continue
+        if (input[field.key] && !next) throw fail(`${field.label} ใช้รูปแบบ ชม:นาที`)
+      } else {
+        next = trim(input[field.key])
+        if (field.key === 'roomNo') next = next.toUpperCase()
+        if (next === current) continue
+        if (field.size && next.length > field.size) throw fail(`${field.label} ยาวเกิน ${field.size} ตัวอักษร`)
+        if (!next && field.required) throw fail(`${field.label} ห้ามเว้นว่าง`)
+        const choices = field.type === 'select' ? lookups.options[field.key] || [] : []
+        if (next && choices.length && !choices.some((row) => row.code === next)) {
+          throw fail(`${field.label} ไม่ถูกต้อง`)
+        }
+      }
+      if (field.lockWhenCi && checkedIn) throw fail(`แขกเช็คอินแล้ว แก้${field.label}ไม่ได้`)
+      changes.push({ field, value: next })
+    }
+    if (!changes.length) return { ok: true, resvNo: String(reservationNo), changed: [] }
+
+    const patch = {}
+    for (const { field, value } of changes) patch[field.column] = value
+    const nextArrival = patch.ArrivalYmd || trim(main.ArrivalYmd)
+    const nextDeparture = patch.DeptYmd || trim(main.DeptYmd)
+    const nextRoom = patch.RoomNo || trim(main.RoomNo)
+    if (!nextArrival || !nextDeparture) throw fail('วันเช็คอินและวันเช็คเอาต์ต้องครบ')
+    if (nextDeparture <= nextArrival) throw fail('วันเช็คเอาต์ต้องหลังวันเช็คอิน')
+    if (!checkedIn && nextArrival < sysDate) {
+      throw fail(`วันเช็คอินต้องไม่ก่อนวันทำการของ PMS (${thaiDate(sysDate)})`)
+    }
+
+    const stayChanged = Boolean(patch.ArrivalYmd || patch.DeptYmd || patch.RoomNo)
+    if (stayChanged && trim(main.ResvStatus).toUpperCase() !== 'CXL') {
+      await assertRoomVacant(pool, {
+        hotelID,
+        roomNo: nextRoom,
+        arrival: nextArrival,
+        departure: nextDeparture,
+        resvNo: reservationNo,
+      })
+      if (patch.RoomNo && !patch.RoomType) {
+        const setup = await pool.request()
+          .input('RoomNo', sql.VarChar(7), nextRoom)
+          .input('HotelId', sql.Int, Number(hotelID))
+          .query(`SELECT TOP 1 LTRIM(RTRIM(RmType)) AS RoomType, LTRIM(RTRIM(RmFeature)) AS RoomFeature FROM RmSetupNum WHERE LTRIM(RTRIM(RmNum)) = @RoomNo AND HotelID = @HotelId`)
+        const row = setup.recordset?.[0]
+        if (row?.RoomType && !trim(main.RoomType)) patch.RoomType = trim(row.RoomType)
+        if (row?.RoomFeature && !Object.prototype.hasOwnProperty.call(patch, 'RoomFeature') && !trim(main.RoomFeature)) {
+          patch.RoomFeature = trim(row.RoomFeature)
+        }
+      }
+    }
+
+    // แขกหลักได้ทุกช่องที่แก้ แขกร่วมได้เฉพาะช่องระดับการจอง (วันที่ ห้อง ราคา โค้ดตลาด ฯลฯ)
+    for (const guest of rows) {
+      const guestPatch = { ...patch }
+      if (Number(guest.GstNo) !== Number(main.GstNo)) {
+        for (const { field } of changes) {
+          if (field.scope === 'guest') delete guestPatch[field.column]
+        }
+      }
+      await appendReservation(pool, guest, guestPatch, { hotelID, user })
+    }
+
+    return {
+      ok: true,
+      resvNo: String(reservationNo),
+      roomNo: nextRoom,
+      arrival: nextArrival,
+      departure: nextDeparture,
+      changed: changes.map((change) => change.field.label),
+    }
+  } finally {
+    try { await pool.close() } catch { /* ignore */ }
+  }
+}
+
+/**
+ * ย้ายการจองไปห้อง/วันใหม่แบบลากใน Booking Calendar ของ PMS (Sp_Transfer_Resv)
+ * ต่างจาก PMS ตรงที่ตรวจห้องปลายทางที่เซิร์ฟเวอร์ และใช้วันเข้าพักจริงของการจอง
+ * ย้ายได้เฉพาะการจองที่ยืนยันแล้วและยังไม่เช็คอิน (แถบสีเหลือง)
+ */
+async function moveReservation({ dbName, hotelID, comNo, resvNo, roomNo, newRoomNo, newArrival }) {
+  const target = trim(newRoomNo)
+  const arrivalNew = trim(newArrival)
+  if (!target || target.length > 7) throw fail('ไม่ได้ระบุห้องปลายทาง')
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(arrivalNew)) throw fail('วันเข้าพักใหม่ไม่ถูกต้อง')
+  if (!comNo) throw fail('ยังไม่ได้ตั้งค่า ComNo ของ PMS')
+
+  const pool = await connectDynamicDB(dbName)
+  try {
+    const context = await loadCheckInContext(pool, { dbName, hotelID, resvNo, roomNo })
+    const { main, rows, reservationNo, arrival, departure, sysDate } = context
+    const source = trim(main.RoomNo)
+    if (rows.some((row) => isGroupResv(row.GroupResv))) throw fail('การจองแบบกรุ๊ป กรุณาย้ายจาก PMS')
+    if (roomKey(source) !== roomKey(context.room)) throw fail(`การจองนี้ไม่ได้ผูกกับห้อง ${context.room}`)
+    if (trim(main.ResvStatus).toUpperCase() === 'CXL') throw fail('การจองนี้ถูกยกเลิกแล้ว')
+    if (rows.some(isCheckedIn)) throw fail('แขกเช็คอินแล้ว ย้ายจากปฏิทินไม่ได้')
+    if (!arrival || !departure || departure <= arrival) throw fail('การจองนี้ยังไม่มีวันที่เข้าพักหรือวันที่ออก')
+
+    const nights = nightsBetween(arrival, departure)
+    if (nights > MAX_DAYS) throw fail(`การจองยาวเกิน ${MAX_DAYS} คืน กรุณาย้ายจาก PMS`)
+    const sameRoom = roomKey(target) === roomKey(source)
+    if (sameRoom && arrivalNew === arrival) throw fail('อยู่ตำแหน่งเดิม ไม่มีอะไรต้องย้าย')
+    if (arrivalNew !== arrival && arrivalNew < sysDate) {
+      throw fail(`ย้ายไปก่อนวันทำการของ PMS (${thaiDate(sysDate)}) ไม่ได้`)
+    }
+    const departureNew = addDays(arrivalNew, nights)
+    const own = String(reservationNo)
+    const today = todayBangkok()
+    const rowOf = (list, roomNo) => list.find((row) => roomKey(row.RoomNo) === roomKey(roomNo))
+
+    // 1) แถบต้นทางต้องเป็นการจองที่ยืนยันแล้ว (สีเหลือง) ของเลขจองนี้
+    const seenFrom = arrival < today ? today : arrival
+    if (seenFrom >= departure) throw fail('การจองนี้เลยวันเข้าพักไปแล้ว ย้ายไม่ได้')
+    const before = await loadForecast(pool, { hotelID, comNo, bgn: seenFrom, end: seenFrom })
+    const sourceCell = parseForecastCell(rowOf(before.rows, source)?.D1)
+    if (!sourceCell || sourceCell.resvNo !== own) throw fail('ไม่พบการจองนี้ในห้องต้นทาง โหลดปฏิทินใหม่แล้วลองอีกครั้ง', 409)
+    if (sourceCell.kind !== 'booked') throw fail('ย้ายได้เฉพาะการจองที่ยืนยันแล้วและยังไม่เช็คอิน')
+
+    // 2) ห้องปลายทางต้องว่างทุกคืน ยกเว้นคืนที่เป็นของการจองนี้เองเมื่อเลื่อนวันในห้องเดิม
+    const checkFrom = arrivalNew < today ? today : arrivalNew
+    const checkTo = addDays(departureNew, -1)
+    if (checkTo < checkFrom) throw fail('ช่วงวันใหม่อยู่ในอดีต ย้ายไม่ได้')
+    const after = await loadForecast(pool, { hotelID, comNo, bgn: checkFrom, end: checkTo })
+    const targetRow = rowOf(after.rows, target)
+    if (!targetRow) throw fail(`ไม่พบห้อง ${target} ใน PMS`)
+    for (let i = 0; i < after.totalDays; i += 1) {
+      const cell = parseForecastCell(targetRow[`D${i + 1}`])
+      if (!cell) continue
+      const day = addDays(checkFrom, i)
+      if (cell.resvNo === own) {
+        if (sameRoom) continue
+        throw fail(`ห้อง ${target} มีการจองเดียวกันนี้อยู่แล้ว`)
+      }
+      throw fail(`ห้อง ${target} ไม่ว่างวันที่ ${thaiDate(day)}${cell.guest ? ` (${cell.guest})` : ''}`)
+    }
+
+    const targetRoomNo = trim(targetRow.RoomNo)
+    await pool.request()
+      .input('HotelId', sql.Int, Number(hotelID))
+      .input('RoomNo', sql.VarChar(7), source)
+      .input('NewRoomNo', sql.VarChar(7), targetRoomNo)
+      .input('ArrDate', sql.DateTime, dateParam(arrival))
+      .input('ArrDateNew', sql.DateTime, dateParam(arrivalNew))
+      .execute('dbo.Sp_Transfer_Resv')
+
+    // 3) ยืนยันผลจากข้อมูลจริง เพราะ Sp_Transfer_Resv ไม่ส่งผลลัพธ์กลับ
+    const reread = await pool.request()
+      .input('ResvNo', sql.Int, reservationNo)
+      .input('GstNo', sql.Int, Number(main.GstNo))
+      .query(`
+        SELECT TOP 1 LTRIM(RTRIM(RoomNo)) AS RoomNo,
+          CONVERT(varchar(10), ArrivalDate, 23) AS ArrivalYmd,
+          CONVERT(varchar(10), DeptDate, 23) AS DeptYmd
+        FROM Reservation WHERE ResvNo = @ResvNo AND GstNo = @GstNo
+      `)
+    const fresh = reread.recordset?.[0]
+    if (!fresh || roomKey(fresh.RoomNo) !== roomKey(targetRoomNo) || trim(fresh.ArrivalYmd) !== arrivalNew) {
+      throw fail('PMS ไม่ได้ย้ายการจองนี้ กรุณาตรวจสอบและย้ายจาก PMS', 409)
+    }
+    return {
+      ok: true,
+      resvNo: own,
+      fromRoom: source,
+      roomNo: targetRoomNo,
+      arrival: arrivalNew,
+      departure: trim(fresh.DeptYmd) || departureNew,
+    }
+  } finally {
+    try { await pool.close() } catch { /* ignore */ }
+  }
+}
+
 module.exports = {
   loadPmsBookingCalendar,
   stopSaleRoom,
   releaseSaleRoom,
   getRoomFolio,
   postFolioEntry,
+  voidFolioLine,
   checkoutRoomFolio,
   getCheckInInfo,
   checkInReservation,
+  updateReservationInfo,
+  moveReservation,
   todayBangkok,
   addDays,
 }

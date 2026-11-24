@@ -404,6 +404,17 @@ function capPublicRooms(actual, cap) {
   return Math.min(real, n)
 }
 
+function publicSellableRooms(actual, stopMin, displayCap) {
+  let n = Number(actual)
+  if (!Number.isFinite(n) || n < 0) n = 0
+  else n = Math.floor(n)
+  const hold = Number(stopMin)
+  if (stopMin != null && stopMin !== '' && Number.isInteger(hold) && hold > 0) {
+    n = Math.max(0, n - hold)
+  }
+  return capPublicRooms(n, displayCap)
+}
+
 function minSetDisplayRooms(nightly, dates) {
   let cap = null
   for (const d of dates) {
@@ -1173,6 +1184,7 @@ async function getChannelQuotes(pool, hotelId, roomTypeId, checkIn, checkOut) {
     channel_closed,
     linked_plans: plans.rows.length,
     display_rooms_cap: displayCaps.length ? Math.min(...displayCaps) : null,
+    stop_min_rooms: stopMin == null ? null : Number(stopMin),
   }
 }
 
@@ -1300,12 +1312,20 @@ async function applyChannelToTypes(pool, hotelId, types, checkIn, checkOut) {
     type.abf_per_night = 0
     type.breakfast_available = type.rate_plans.some((p) => p.includes_breakfast)
     type.abf_per_person_per_night = quotes.breakfast?.abfAvg || 0
-    if (quotes.display_rooms_cap != null) {
-      type.available_count = capPublicRooms(type.available_count, quotes.display_rooms_cap)
-      type.display_rooms_cap = quotes.display_rooms_cap
-    }
+    type.available_count = publicSellableRooms(
+      type.available_count,
+      quotes.stop_min_rooms,
+      quotes.display_rooms_cap,
+    )
+    if (quotes.display_rooms_cap != null) type.display_rooms_cap = quotes.display_rooms_cap
   }
-  return types.filter((t) => !t.channel_closed && (Number(t.available_count) || 0) > 0)
+  return types.filter((t) => {
+    if (t.channel_closed) return false
+    const left = Number(t.available_count) || 0
+    if (left <= 0) return false
+    const needed = Number(t.rooms_needed)
+    return !Number.isFinite(needed) || needed <= left
+  })
 }
 
 module.exports = {
@@ -1334,6 +1354,7 @@ module.exports = {
   applyDisplayPrice,
   applyRoomCount,
   capPublicRooms,
+  publicSellableRooms,
   capSellRooms,
   getCalendar,
   getStayAllotmentCap,

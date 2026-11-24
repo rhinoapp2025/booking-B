@@ -123,6 +123,27 @@ function cheapestRoomType(types) {
 /** จองที่ยึดเลขห้องในคลัง PG — เช็คเอาต์ / ยกเลิก / ไม่มา ไม่ยึดห้องแล้ว */
 const ROOM_HOLD_STATUS_SQL = `b.status NOT IN ('cancelled', 'checked_out', 'no_show')`
 
+async function unpushedHoldsByType(pool, hotelId, checkIn, checkOut) {
+  const result = await pool.query(
+    `SELECT s.room_type_id, COALESCE(SUM(s.room_count), 0)::int AS n
+     FROM (
+       SELECT DISTINCT b.id, b.room_count, br.room_type_id
+       FROM booking_rooms br
+       JOIN bookings b ON b.id = br.booking_id
+       WHERE b.hotel_id = $1
+         AND ${ROOM_HOLD_STATUS_SQL}
+         AND b.check_in_date < $3
+         AND b.check_out_date > $2
+         AND NULLIF(TRIM(COALESCE(b.pms_resv_no, '')), '') IS NULL
+     ) s
+     GROUP BY s.room_type_id`,
+    [hotelId, checkIn, checkOut]
+  )
+  const held = new Map()
+  for (const row of result.rows) held.set(row.room_type_id, Number(row.n) || 0)
+  return held
+}
+
 async function getAvailableRoomTypes(pool, hotelId, { checkIn, checkOut, adults = 1, children = 0, rooms, hotelSlug } = {}) {
   const adultsN = Math.max(1, Number(adults) || 1)
   const childrenN = Math.max(0, Number(children) || 0)
@@ -205,6 +226,11 @@ async function getAvailableRoomTypes(pool, hotelId, { checkIn, checkOut, adults 
     types = await typesFromPmsSellable(
       pool, hotelId, pmsSellableByType, kioskSyncedRooms, adultsN, childrenN, slug, rooms,
     )
+    const held = await unpushedHoldsByType(pool, hotelId, checkIn, checkOut)
+    types = types.filter((t) => {
+      t.available_count = Math.max(0, Number(t.available_count) - (held.get(t.id) || 0))
+      return t.available_count >= (Number(t.rooms_needed) || 1)
+    })
   } else {
     const sourceRows = availableRooms.rows
     const typeMap = {}

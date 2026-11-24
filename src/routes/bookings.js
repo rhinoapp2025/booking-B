@@ -224,7 +224,7 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       if (!rtResult.rows[0]) throw Object.assign(new Error('Room type not found or unavailable'), { status: 404 })
       const roomType = rtResult.rows[0]
 
-      const { getChannelQuotes, quoteChannelStay, parseBreakfastChoice } = require('../utils/channelManager')
+      const { getChannelQuotes, quoteChannelStay, parseBreakfastChoice, publicSellableRooms } = require('../utils/channelManager')
       const requestedRooms = parseInt(req.body.room_count, 10)
       const roomCount = Number.isFinite(requestedRooms) && requestedRooms > 0 ? requestedRooms : 1
       const partySize = Math.max(1, Number(num_adults) + Number(num_children))
@@ -235,6 +235,7 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       ])
       const pmsSellableOn = kioskCfg.kiosk_enabled === 'true'
         && Boolean(kioskCfg.kiosk_db_name && kioskCfg.kiosk_hotel_id && kioskCfg.kiosk_com_no)
+      let realVacant = null
       if (pmsSellableOn) {
         const { getKioskStaySellableByType } = require('../utils/kioskVacantRooms')
         const sellableMap = await getKioskStaySellableByType({
@@ -272,6 +273,7 @@ router.post('/:hotelSlug', auth, async (req, res) => {
           if (unpushed.rows[0].n + roomCount > sellable) {
             throw Object.assign(new Error('ไม่มีห้องว่างในช่วงวันที่เลือก'), { status: 409 })
           }
+          realVacant = sellable - unpushed.rows[0].n
         }
       }
 
@@ -287,6 +289,19 @@ router.post('/:hotelSlug', auth, async (req, res) => {
           [hotel.id, check_in_date, check_out_date]
         )
         const bookedIds = bookedResult.rows.map(r => r.room_id)
+
+        const roomFilter = bookedIds.length > 0
+          ? `AND id NOT IN (${bookedIds.map((_, i) => `$${i + 3}`).join(',')})`
+          : ''
+        const vacantCount = await client.query(
+          `SELECT COUNT(*)::int AS n FROM rooms
+           WHERE hotel_id = $1 AND room_type_id = $2 AND status = 'available' ${roomFilter}`,
+          [hotel.id, room_type_id, ...bookedIds]
+        )
+        realVacant = vacantCount.rows[0].n
+        if (realVacant < roomCount) {
+          throw Object.assign(new Error('ไม่มีห้องว่างในช่วงวันที่เลือก'), { status: 409 })
+        }
 
         const roomQuery = bookedIds.length > 0
           ? `SELECT id FROM rooms WHERE hotel_id = $1 AND room_type_id = $2 AND status = 'available'
@@ -313,7 +328,12 @@ router.post('/:hotelSlug', auth, async (req, res) => {
       if (!channelQuotes.plans.length) {
         throw Object.assign(new Error('ยังไม่ได้ตั้งราคาขายในช่วงวันที่เลือก — ไปตั้งที่แท็บราคาขาย'), { status: 409 })
       }
-      if (channelQuotes.display_rooms_cap != null && roomCount > channelQuotes.display_rooms_cap) {
+      if (realVacant != null) {
+        const offer = publicSellableRooms(realVacant, channelQuotes.stop_min_rooms, channelQuotes.display_rooms_cap)
+        if (roomCount > offer) {
+          throw Object.assign(new Error('ไม่มีห้องว่างในช่วงวันที่เลือก'), { status: 409 })
+        }
+      } else if (channelQuotes.display_rooms_cap != null && roomCount > channelQuotes.display_rooms_cap) {
         throw Object.assign(new Error('ไม่มีห้องว่างในช่วงวันที่เลือก'), { status: 409 })
       }
       if (!chosenRatePlanId) {

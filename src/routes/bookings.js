@@ -203,6 +203,9 @@ router.post('/:hotelSlug', auth, async (req, res) => {
         || !String(guest_first_name || '').trim() || !String(guest_last_name || '').trim()) {
       return res.status(400).json({ error: 'กรอกคำนำหน้า เพศ ชื่อ และนามสกุล' })
     }
+    if (!String(guest_phone || '').trim()) {
+      return res.status(400).json({ error: 'กรอกเบอร์โทรศัพท์' })
+    }
     if (check_out_date <= check_in_date) {
       return res.status(400).json({ error: 'check_out_date must be after check_in_date' })
     }

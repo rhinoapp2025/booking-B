@@ -24,7 +24,7 @@ const app = express()
 
 app.use(shareBotMiddleware)
 app.use(cors(createCorsOptions()))
-app.use(express.json({ limit: '3mb' }))
+app.use(express.json({ limit: '20mb' }))
 app.use(passport.initialize())
 
 app.use('/api/auth',     require('./routes/auth'))

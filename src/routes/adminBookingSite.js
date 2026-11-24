@@ -6,7 +6,7 @@ const {
   isAllowedFolder,
   listFolderImages,
   saveFolderImage,
-  parseBase64Image,
+  parseBase64Media,
 } = require('../utils/bookingSiteImages')
 
 async function loadHotel(slug) {
@@ -68,7 +68,7 @@ router.post('/:hotelSlug/booking-site/upload/:folder', requireBookingSite, async
   if (!isAllowedFolder(req.params.folder)) {
     return res.status(400).json({ error: 'ชื่อโฟลเดอร์ใช้ได้เฉพาะ a-z 0-9 - _' })
   }
-  const parsed = parseBase64Image(req.body?.image_data, req.body?.image_mime)
+  const parsed = parseBase64Media(req.body?.image_data, req.body?.image_mime)
   if (!parsed) return res.status(400).json({ error: 'ต้องส่งรูปภาพ' })
   if (parsed.error) return res.status(400).json({ error: parsed.error })
   try {

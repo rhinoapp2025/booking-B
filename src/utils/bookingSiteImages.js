@@ -5,13 +5,35 @@ const { getBookingSiteUploadRoot } = require('./uploadPaths')
 const { parseBase64Image } = require('./chatImages')
 
 const FOLDER_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/i
-const FILE_RE = /^[a-z0-9][a-z0-9._-]{0,79}\.(jpe?g|png|webp|gif)$/i
+const FILE_RE = /^[a-z0-9][a-z0-9._-]{0,79}\.(jpe?g|png|webp|gif|mp4|webm)$/i
 const MIME_BY_EXT = {
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   png: 'image/png',
   webp: 'image/webp',
   gif: 'image/gif',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+}
+const VIDEO_MIME = {
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+}
+const VIDEO_MAX_BYTES = 12 * 1024 * 1024
+
+function parseBase64Media(imageData, imageMime) {
+  let b64 = String(imageData || '')
+  const match = b64.match(/^data:([^;]+);base64,(.+)$/i)
+  const mimeFromData = match ? String(match[1] || '').toLowerCase().trim() : ''
+  if (match) b64 = match[2]
+  let mime = String(imageMime || mimeFromData || '').toLowerCase().trim()
+  const ext = VIDEO_MIME[mime]
+  if (!ext) return parseBase64Image(imageData, imageMime)
+  let buffer
+  try { buffer = Buffer.from(b64, 'base64') } catch { return { error: 'วิดีโอไม่ถูกต้อง' } }
+  if (!buffer.length) return { error: 'วิดีโอว่าง' }
+  if (buffer.length > VIDEO_MAX_BYTES) return { error: 'วิดีโอใหญ่เกิน 12MB' }
+  return { buffer, ext, mime }
 }
 
 function isAllowedFolder(folder) {
@@ -90,4 +112,5 @@ module.exports = {
   readFolderImage,
   mimeForFilename,
   parseBase64Image,
+  parseBase64Media,
 }

@@ -10,7 +10,7 @@ const { attachHotelBranding, attachHotelsBranding, readUiImage, normalizeKind, s
 const { attachHotelTheme } = require('../utils/hotelTheme')
 const { getAvailableRoomTypes, cheapestRoomType, stayNightPrice } = require('../utils/availableRooms')
 const { getNetworkBranding, readNetworkUiImage } = require('../utils/networkBranding')
-const { bookingOpenByHotelId, isHotelBookingOpen } = require('../utils/bookingOpen')
+const { bookingOpenByHotelId, isHotelBookingOpen, setHotelBookingOpen } = require('../utils/bookingOpen')
 
 // GET /api/hotels — รายชื่อโรงแรมทั้งหมดที่ active
 router.get('/', async (req, res) => {
@@ -521,6 +521,9 @@ router.patch('/:slug', auth, admin, async (req, res) => {
       values
     )
     if (!result.rows[0]) return res.status(404).json({ error: 'Hotel not found' })
+    if (req.body.is_active !== undefined) {
+      await setHotelBookingOpen(pool, result.rows[0].id, req.body.is_active)
+    }
     res.json(await shapeHotelWithCatalog(pool, result.rows[0]))
   } catch (err) {
     res.status(500).json({ error: err.message })

@@ -17,6 +17,7 @@ const {
 const { HOTEL_RETURN, shapeHotel, shapeHotelWithCatalog, pickHotelFields, pickConfigSettings, CONFIG_SETTING_KEYS } = require('../utils/hotelShape')
 const { resolveHotelMapEmbedUrl } = require('../utils/googleMapEmbed')
 const { isHotelFeatureEnabled } = require('../utils/hotelFeatureFlags')
+const { setHotelBookingOpen } = require('../utils/bookingOpen')
 const { getHotelBookingPolicies, applyBookingPolicies, normalizeCancellationPolicy } = require('../utils/bookingPolicies')
 const { attachHotelBranding, saveHotelUiImage, removeHotelUiImage } = require('../utils/hotelBranding')
 const { attachHotelTheme } = require('../utils/hotelTheme')
@@ -1430,6 +1431,9 @@ router.patch('/:hotelSlug/info', requireHotelAdmin, async (req, res) => {
     const r = await pool.query(
       `UPDATE hotels SET ${fields.join(', ')} WHERE id = $1 RETURNING ${HOTEL_RETURN}`, params
     )
+    if (Object.prototype.hasOwnProperty.call(patch, 'is_active')) {
+      await setHotelBookingOpen(pool, hotel.id, patch.is_active)
+    }
     res.json(shapeHotel(r.rows[0]))
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -1478,6 +1482,9 @@ router.patch('/:hotelSlug/config', requireHotelAdmin, async (req, res) => {
       }
       fields.push('updated_at = NOW()')
       await pool.query(`UPDATE hotels SET ${fields.join(', ')} WHERE id = $1`, params)
+      if (Object.prototype.hasOwnProperty.call(hotelPatch, 'is_active')) {
+        await setHotelBookingOpen(pool, hotel.id, hotelPatch.is_active)
+      }
     }
 
     const settingsPatch = pickConfigSettings(req.body)

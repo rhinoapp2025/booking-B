@@ -39,6 +39,10 @@ async function isHotelBookingOpen(pool, hotelId) {
 async function setHotelBookingOpen(pool, hotelId, open) {
   const enabled = coerceBookingOpen(open)
   await setHotelSetting(pool, hotelId, BOOKING_OPEN_KEY, enabled ? '1' : '0')
+  await pool.query(
+    `UPDATE hotels SET is_active = $2, updated_at = NOW() WHERE id = $1`,
+    [hotelId, enabled]
+  )
   return enabled
 }
 

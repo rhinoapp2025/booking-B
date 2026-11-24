@@ -106,7 +106,7 @@ async function getPlatformFeatureState(pool) {
       slug: hotel.slug,
       name: hotel.name,
       is_active: hotel.is_active,
-      booking_open: isBookingOpenValue(hotelMap.booking_open),
+      booking_open: hotel.is_active !== false && isBookingOpenValue(hotelMap.booking_open),
       features: buildResolvedFeatures(hotelMap, appMap),
       overrides,
     })

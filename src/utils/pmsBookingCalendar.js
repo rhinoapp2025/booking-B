@@ -536,7 +536,7 @@ async function folioLines(pool, roomNo, folioNo, sysDate) {
 async function folioCatalog(pool) {
   // ตรงกับแคชเชียร์ PMS:
   // - getitempage: TrnGroupCode='1' แล้วแยก Posting (TrnCredit=0) / Rebate (TrnCredit=1)
-  // - getPayment: TrnReplace=9 เท่านั้น (ไม่รวมรีเบท)
+  // - getPayment: TrnGrp=9 เท่านั้น (ไม่รวมรีเบท)
   const [items, payments, companies] = await Promise.all([
     pool.request().query(`
       SELECT
@@ -551,7 +551,7 @@ async function folioCatalog(pool) {
     pool.request().query(`
       SELECT LTRIM(RTRIM(TrnCode)) AS code, LTRIM(RTRIM(TrnName)) AS name
       FROM dbo.TrnCode
-      WHERE TrnReplace = 9 AND TrnCodeRecordStatus = 'Y'
+      WHERE TrnGrp = 9 AND TrnCodeRecordStatus = 'Y'
       ORDER BY TrnCode
     `),
     pool.request().query(`

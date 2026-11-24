@@ -21,6 +21,7 @@ const HOTEL_FEATURE_CATALOG = [
       { key: 'tab_bookings', label: 'การจอง', default: true, locked: true },
       { key: 'tab_rooms', label: 'ห้องพัก', default: true },
       { key: 'tab_kiosk', label: 'PMS', default: true },
+      { key: 'feat_pms_calendar', label: 'ปฏิทินจอง (สาขาที่ต่อ PMS)', default: true },
       { key: 'tab_settings', label: 'ตั้งค่าโรงแรม', default: true },
     ],
   },

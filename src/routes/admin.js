@@ -1794,6 +1794,11 @@ router.post('/:hotelSlug/kiosk-config/test', requireHotelAdmin, async (req, res)
 })
 
 async function pmsConnection(pool, hotel) {
+  if (!(await isHotelFeatureEnabled(pool, hotel.id, 'feat_pms_calendar'))) {
+    const error = new Error('สาขานี้ปิดปฏิทินจองอยู่')
+    error.status = 403
+    throw error
+  }
   const settings = await getHotelSettings(pool, hotel.id, [
     'kiosk_enabled', 'kiosk_db_name', 'kiosk_hotel_id', 'kiosk_com_no',
   ])
@@ -1916,6 +1921,49 @@ router.post('/:hotelSlug/pms-calendar/folio/checkout', requireHotelAdmin, async 
     }))
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
+// เช็คอินจากปฏิทิน: GET ดูข้อมูลการจอง + ช่องที่ยังขาด, POST เช็คอินจริง
+router.get('/:hotelSlug/pms-calendar/checkin', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { getCheckInInfo } = require('../utils/pmsBookingCalendar')
+    res.json(await getCheckInInfo({
+      dbName: pms.dbName,
+      hotelID: pms.hotelID,
+      resvNo: req.query.resvNo,
+      roomNo: req.query.roomNo,
+    }))
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
+router.post('/:hotelSlug/pms-calendar/checkin', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { checkInReservation } = require('../utils/pmsBookingCalendar')
+    res.json(await checkInReservation({
+      dbName: pms.dbName,
+      hotelID: pms.hotelID,
+      resvNo: req.body?.resvNo,
+      roomNo: req.body?.roomNo,
+      userId: req.body?.userId,
+      fill: req.body?.fill,
+      paidBy: req.body?.paidBy,
+      depositAmount: req.body?.depositAmount,
+      reference: req.body?.reference,
+      keyAmount: req.body?.keyAmount,
+    }))
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message, missing: err.missing })
   }
 })
 

@@ -19,7 +19,7 @@ const VIDEO_MIME = {
   'video/mp4': 'mp4',
   'video/webm': 'webm',
 }
-const VIDEO_MAX_BYTES = 12 * 1024 * 1024
+const VIDEO_MAX_BYTES = 100 * 1024 * 1024
 
 function parseBase64Media(imageData, imageMime) {
   let b64 = String(imageData || '')
@@ -32,7 +32,7 @@ function parseBase64Media(imageData, imageMime) {
   let buffer
   try { buffer = Buffer.from(b64, 'base64') } catch { return { error: 'วิดีโอไม่ถูกต้อง' } }
   if (!buffer.length) return { error: 'วิดีโอว่าง' }
-  if (buffer.length > VIDEO_MAX_BYTES) return { error: 'วิดีโอใหญ่เกิน 12MB' }
+  if (buffer.length > VIDEO_MAX_BYTES) return { error: 'วิดีโอใหญ่เกิน 100MB' }
   return { buffer, ext, mime }
 }
 

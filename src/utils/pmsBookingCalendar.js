@@ -852,6 +852,7 @@ async function checkInLookups(pool) {
       source: trim(row.BusSourceDef),
       guestType: trim(row.GstTypeDef),
       guestLevel: trim(row.GstLevelDef),
+      agent: trim(row.AgentDef),
     }
     times = { arrival: hmsOf(row.Def_TimeCheckIn), departure: hmsOf(row.Def_TimeCheckOut) }
     postRoomOnCheckIn = trim(row.PostRoomOnCheckIn).toUpperCase() === 'Y'
@@ -1410,8 +1411,8 @@ function ymdOf(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ''
 }
 
-// บันทึกแบบ PMS: ส่งแถวปัจจุบันทั้งหมดเข้า Sp_ReservationAppend (RecState=2) แล้วทับเฉพาะช่องที่แก้
-async function appendReservation(pool, guest, patch, { hotelID, user }) {
+// บันทึกแบบ PMS: Sp_ReservationAppend — RecState 1=ใหม่, 2=แก้ไข
+async function appendReservation(pool, guest, patch, { hotelID, user, recState = 2 }) {
   const arrival = patch.ArrivalYmd || ymdOf(guest.ArrivalDate) || trim(guest.ArrivalYmd)
   const departure = patch.DeptYmd || ymdOf(guest.DeptDate) || trim(guest.DeptYmd)
   const arrivalHms = patch.ArrivalHms || hmsOf(guest.ArrivalTime) || trim(guest.ArrivalHms) || '14:00:00'
@@ -1429,13 +1430,15 @@ async function appendReservation(pool, guest, patch, { hotelID, user }) {
     const n = Number(raw)
     return Number.isFinite(n) ? n : fallback
   }
+  const state = Number(recState) === 1 ? 1 : 2
+  const roomCount = state === 1 ? 1 : (Number(guest.RoomCount) === 1 ? 1 : 0)
 
   await pool.request()
-    .input('RecState', sql.Int, 2)
+    .input('RecState', sql.Int, state)
     .input('ResvNo', sql.Int, Number(guest.ResvNo))
     .input('OTABookingNo', sql.VarChar(20), text('OTABookingNo'))
-    .input('GstNo', sql.Int, Number(guest.GstNo))
-    .input('ResvDate', sql.DateTime, guest.ResvDate || null)
+    .input('GstNo', sql.Int, Number(guest.GstNo) || 1)
+    .input('ResvDate', sql.DateTime, guest.ResvDate || dateParam(ymdOf(new Date())) || null)
     .input('GstFName', sql.VarChar(30), text('GstFName'))
     .input('GstLName', sql.VarChar(30), text('GstLName'))
     .input('GStTitle', sql.VarChar(16), text('GstTitle'))
@@ -1460,7 +1463,7 @@ async function appendReservation(pool, guest, patch, { hotelID, user }) {
     .input('DeptBy', sql.VarChar(2), text('DeptBy', ' '))
     .input('DeptFlgDetail', sql.VarChar(10), text('DeptFlgDetail', ' '))
     .input('DeptServiceBy', sql.VarChar(3), text('DeptServiceBy', ' '))
-    .input('RoomCount', sql.SmallInt, Number(guest.RoomCount) === 1 ? 1 : 0)
+    .input('RoomCount', sql.SmallInt, roomCount)
     .input('RoomType', sql.VarChar(5), text('RoomType'))
     .input('RoomRateCode', sql.VarChar(7), text('RoomRateCode', ' '))
     .input('RoomRateAmt', sql.Float, num('RoomRateAmt'))
@@ -1646,6 +1649,241 @@ async function updateReservationInfo({ dbName, hotelID, resvNo, roomNo, userId, 
   }
 }
 
+function pickOption(list, preferred) {
+  const rows = Array.isArray(list) ? list : []
+  if (preferred && rows.some((row) => row.code === preferred)) return preferred
+  return rows[0]?.code || ''
+}
+
+function pickResvStatus(list) {
+  const rows = Array.isArray(list) ? list : []
+  const prefer = ['CF', 'F', 'TK', 'TN', 'GU']
+  for (const code of prefer) {
+    if (rows.some((row) => row.code === code)) return code
+  }
+  return rows.find((row) => trim(row.code).toUpperCase() !== 'CXL')?.code || rows[0]?.code || 'CF'
+}
+
+async function roomSetupOf(pool, hotelID, roomNo) {
+  const room = trim(roomNo).toUpperCase()
+  const result = await pool.request()
+    .input('RoomNo', sql.VarChar(7), room)
+    .input('HotelId', sql.Int, Number(hotelID))
+    .query(`
+      SELECT TOP 1
+        LTRIM(RTRIM(RmNum)) AS RoomNo,
+        LTRIM(RTRIM(RmType)) AS RoomType,
+        LTRIM(RTRIM(ISNULL(RmFeature, ''))) AS RoomFeature,
+        ISNULL(RateOnRoom, 0) AS RateOnRoom,
+        LTRIM(RTRIM(ISNULL(RmStatus, ''))) AS RmStatus
+      FROM RmSetupNum
+      WHERE LTRIM(RTRIM(RmNum)) = @RoomNo AND HotelID = @HotelId
+    `)
+  const row = result.recordset?.[0]
+  if (!row) throw fail(`ไม่พบห้อง ${room} ใน PMS`, 404)
+  return {
+    roomNo: trim(row.RoomNo),
+    roomType: trim(row.RoomType),
+    roomFeature: trim(row.RoomFeature),
+    rate: money(row.RateOnRoom),
+    status: trim(row.RmStatus).toUpperCase(),
+  }
+}
+
+/**
+ * ฟอร์มจองใหม่จากช่องว่างในปฏิทิน — ค่าเริ่มต้นจาก FRONT_OPTION + ห้องที่กด
+ */
+async function getNewBookingInfo({ dbName, hotelID, roomNo, arrival }) {
+  const room = trim(roomNo)
+  if (!room) throw fail('ไม่ได้ระบุห้อง')
+  const pool = await connectDynamicDB(dbName)
+  try {
+    const sysDate = await getKioskSysDate({ dbName, hotelID }) || todayBangkok()
+    const arrivalDay = /^\d{4}-\d{2}-\d{2}$/.test(trim(arrival)) ? trim(arrival) : sysDate
+    if (arrivalDay < sysDate) throw fail(`วันเช็คอินต้องไม่ก่อนวันทำการของ PMS (${thaiDate(sysDate)})`)
+    const setup = await roomSetupOf(pool, hotelID, room)
+    const lookups = await checkInLookups(pool)
+    const departure = addDays(arrivalDay, 1)
+    const seed = {
+      ArrivalYmd: arrivalDay,
+      DeptYmd: departure,
+      ArrivalHms: lookups.times.arrival || '14:00:00',
+      DeptHms: lookups.times.departure || '12:00:00',
+      RoomNo: setup.roomNo,
+      RoomType: setup.roomType,
+      RoomFeature: setup.roomFeature,
+      ResvStatus: pickResvStatus(lookups.options.resvStatus),
+      GstTitle: pickOption(lookups.options.title, 'Mr.'),
+      GstFName: '',
+      GstLName: '',
+      Sex: 'male',
+      Birthday: '',
+      GstNation: pickOption(lookups.options.nation, lookups.defaults.nation),
+      NationCardId: '',
+      GstPassPortNo: '',
+      TelNo: '',
+      EMAIL: '',
+      HomeAddress1: '',
+      HomeAddress2: '',
+      HomeAddress3: '',
+      GstAgent: pickOption(lookups.options.agent, lookups.defaults.agent),
+      VoucherNo: '',
+      GstMarketCode: pickOption(lookups.options.market, lookups.defaults.market),
+      GstBusSource: pickOption(lookups.options.source, lookups.defaults.source),
+      GstType: pickOption(lookups.options.guestType, lookups.defaults.guestType),
+      GstLevel: pickOption(lookups.options.guestLevel, lookups.defaults.guestLevel),
+      GstAdult: 2,
+      GstChildren: 0,
+      RoomRateAmt: setup.rate,
+      AbfAdult: 2,
+      AbfAmt: 0,
+      QtyAbfChild: 0,
+      AbfChildAmt: 0,
+      PaymentType: pickOption(lookups.options.paidBy, ''),
+      DepositAmt: 0,
+      DepositKeyAmt: 0,
+      Reference: '',
+      Chargeto: '',
+      CreditLimit: 0,
+      Memo1: '',
+      Memo2: '',
+    }
+    return {
+      roomNo: setup.roomNo,
+      roomType: setup.roomType,
+      roomFeature: setup.roomFeature,
+      sysDate,
+      arrival: arrivalDay,
+      departure,
+      rate: setup.rate,
+      fields: EDIT_FIELDS.map((field) => ({
+        key: field.key,
+        label: field.label,
+        type: field.type,
+        group: field.group,
+        size: field.size || null,
+        min: field.min != null ? field.min : null,
+        required: Boolean(field.required),
+        locked: false,
+        options: field.type === 'select' ? lookups.options[field.key] || [] : null,
+        value: fieldCurrent(seed, field),
+      })),
+    }
+  } finally {
+    try { await pool.close() } catch { /* ignore */ }
+  }
+}
+
+/**
+ * สร้างการจองใหม่จากปฏิทิน — Sp_GuestSequentUpdate + Sp_ReservationAppend(RecState=1)
+ */
+async function createReservation({ dbName, hotelID, userId, values }) {
+  const input = values && typeof values === 'object' ? values : {}
+  const user = trim(userId).slice(0, 20) || 'webadmin'
+  const pool = await connectDynamicDB(dbName)
+  try {
+    const sysDate = await getKioskSysDate({ dbName, hotelID }) || todayBangkok()
+    const lookups = await checkInLookups(pool)
+    const patch = {}
+    for (const field of EDIT_FIELDS) {
+      let raw = field.key in input ? input[field.key] : undefined
+      if (raw === undefined) {
+        // ใช้ค่าเริ่มต้นจาก lookup เมื่อไม่ได้ส่งมา
+        if (field.key === 'nation') raw = pickOption(lookups.options.nation, lookups.defaults.nation)
+        else if (field.key === 'market') raw = pickOption(lookups.options.market, lookups.defaults.market)
+        else if (field.key === 'source') raw = pickOption(lookups.options.source, lookups.defaults.source)
+        else if (field.key === 'guestType') raw = pickOption(lookups.options.guestType, lookups.defaults.guestType)
+        else if (field.key === 'guestLevel') raw = pickOption(lookups.options.guestLevel, lookups.defaults.guestLevel)
+        else if (field.key === 'agent') raw = pickOption(lookups.options.agent, lookups.defaults.agent)
+        else if (field.key === 'resvStatus') raw = pickResvStatus(lookups.options.resvStatus)
+        else if (field.key === 'title') raw = pickOption(lookups.options.title, 'Mr.')
+        else if (field.key === 'sex') raw = 'male'
+        else if (field.key === 'adults') raw = 2
+        else if (field.key === 'children') raw = 0
+        else if (field.key === 'arrivalTime') raw = lookups.times.arrival || '14:00:00'
+        else if (field.key === 'departureTime') raw = lookups.times.departure || '12:00:00'
+        else if (field.type === 'money' || field.type === 'number') raw = 0
+        else raw = ''
+      }
+      let next
+      if (field.type === 'number') {
+        next = Math.floor(Number(raw))
+        if (!Number.isFinite(next) || next < (field.min ?? 0) || next > 99) {
+          throw fail(`${field.label} ต้องอยู่ระหว่าง ${field.min ?? 0}–99`)
+        }
+      } else if (field.type === 'money') {
+        next = money(raw)
+        if (!(next >= (field.min ?? 0))) throw fail(`${field.label} ต้องไม่ติดลบ`)
+      } else if (field.type === 'date') {
+        next = trim(raw).slice(0, 10)
+        if (field.required && !next) throw fail(`${field.label} ห้ามเว้นว่าง`)
+        if (next && !/^\d{4}-\d{2}-\d{2}$/.test(next)) throw fail(`${field.label} ไม่ถูกต้อง`)
+      } else if (field.type === 'time') {
+        next = normalizeTime(raw) || (field.key === 'arrivalTime' ? '14:00:00' : '12:00:00')
+      } else {
+        next = trim(raw)
+        if (field.key === 'roomNo') next = next.toUpperCase()
+        if (field.size && next.length > field.size) throw fail(`${field.label} ยาวเกิน ${field.size} ตัวอักษร`)
+        if (!next && field.required) throw fail(`${field.label} ห้ามเว้นว่าง`)
+        const choices = field.type === 'select' ? lookups.options[field.key] || [] : []
+        if (next && choices.length && !choices.some((row) => row.code === next)) {
+          throw fail(`${field.label} ไม่ถูกต้อง`)
+        }
+      }
+      patch[field.column] = next
+    }
+
+    const arrival = patch.ArrivalYmd
+    const departure = patch.DeptYmd
+    const room = patch.RoomNo
+    if (!arrival || !departure) throw fail('วันเช็คอินและวันเช็คเอาต์ต้องครบ')
+    if (departure <= arrival) throw fail('วันเช็คเอาต์ต้องหลังวันเช็คอิน')
+    if (arrival < sysDate) throw fail(`วันเช็คอินต้องไม่ก่อนวันทำการของ PMS (${thaiDate(sysDate)})`)
+    if (nightsBetween(arrival, departure) > MAX_DAYS) {
+      throw fail(`จองได้ไม่เกิน ${MAX_DAYS} คืน`)
+    }
+
+    const setup = await assertRoomVacant(pool, {
+      hotelID,
+      roomNo: room,
+      arrival,
+      departure,
+      resvNo: 0,
+    })
+    if (!patch.RoomType) patch.RoomType = trim(setup.RoomType)
+    if (!patch.RoomFeature) patch.RoomFeature = trim(setup.RoomFeature)
+
+    const seq = await pool.request().execute('Sp_GuestSequentUpdate')
+    const resvNo = Number(seq.returnValue) || Number(seq.recordset?.[0]?.ResvNo) || 0
+    if (!resvNo) throw fail('สร้างเลขจองใหม่ไม่สำเร็จ')
+
+    const firstName = trim(patch.GstFName)
+    const lastName = trim(patch.GstLName)
+    patch.ResvName = `${firstName} ${lastName}`.trim().slice(0, 48)
+    if (!patch.AbfAdult && Number(patch.GstAdult) > 0) patch.AbfAdult = Number(patch.GstAdult)
+
+    const guest = {
+      ResvNo: resvNo,
+      GstNo: 1,
+      RoomCount: 1,
+      HotelId: Number(hotelID),
+      ResvDate: dateParam(sysDate),
+      FolioPrintNo: 1,
+    }
+    await appendReservation(pool, guest, patch, { hotelID, user, recState: 1 })
+    return {
+      ok: true,
+      resvNo: String(resvNo),
+      roomNo: room,
+      arrival,
+      departure,
+      guest: patch.ResvName || firstName,
+    }
+  } finally {
+    try { await pool.close() } catch { /* ignore */ }
+  }
+}
+
 /**
  * ย้ายการจองไปห้อง/วันใหม่แบบลากใน Booking Calendar ของ PMS (Sp_Transfer_Resv)
  * ต่างจาก PMS ตรงที่ตรวจห้องปลายทางที่เซิร์ฟเวอร์ และใช้วันเข้าพักจริงของการจอง
@@ -1754,6 +1992,8 @@ module.exports = {
   getCheckInInfo,
   checkInReservation,
   updateReservationInfo,
+  getNewBookingInfo,
+  createReservation,
   moveReservation,
   todayBangkok,
   addDays,

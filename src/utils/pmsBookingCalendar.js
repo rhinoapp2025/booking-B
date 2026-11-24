@@ -7,7 +7,8 @@
 const { sql, connectDynamicDB } = require('../db/mssql')
 const { getKioskSysDate } = require('./kioskVacantRooms')
 
-const MAX_DAYS = 31
+// เท่ากับช่วงยาวสุดที่ Booking Calendar ของ PMS ให้เลือก
+const MAX_DAYS = 90
 
 function trim(value) {
   return String(value ?? '').trim()

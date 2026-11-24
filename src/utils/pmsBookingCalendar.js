@@ -534,17 +534,24 @@ async function folioLines(pool, roomNo, folioNo, sysDate) {
 }
 
 async function folioCatalog(pool) {
+  // ตรงกับแคชเชียร์ PMS:
+  // - getitempage: TrnGroupCode='1' แล้วแยก Posting (TrnCredit=0) / Rebate (TrnCredit=1)
+  // - getPayment: TrnReplace=9 เท่านั้น (ไม่รวมรีเบท)
   const [items, payments, companies] = await Promise.all([
     pool.request().query(`
-      SELECT LTRIM(RTRIM(TrnCode)) AS code, LTRIM(RTRIM(TrnName)) AS name, TrnPrice1 AS price
+      SELECT
+        LTRIM(RTRIM(TrnCode)) AS code,
+        LTRIM(RTRIM(TrnName)) AS name,
+        TrnPrice1 AS price,
+        ISNULL(TrnCredit, 0) AS credit
       FROM dbo.TrnCode
-      WHERE TrnGroupCode = '1' AND TrnCodeRecordStatus = 'Y' AND ISNULL(TrnCredit, 0) = 0
+      WHERE TrnGroupCode = '1' AND TrnCodeRecordStatus = 'Y'
       ORDER BY TrnCode
     `),
     pool.request().query(`
       SELECT LTRIM(RTRIM(TrnCode)) AS code, LTRIM(RTRIM(TrnName)) AS name
       FROM dbo.TrnCode
-      WHERE TrnCodeRecordStatus = 'Y' AND (TrnGrp = 9 OR ISNULL(TrnCredit, 0) = 1)
+      WHERE TrnReplace = 9 AND TrnCodeRecordStatus = 'Y'
       ORDER BY TrnCode
     `),
     pool.request().query(`
@@ -554,9 +561,16 @@ async function folioCatalog(pool) {
       ORDER BY AgName
     `).catch(() => ({ recordset: [] })),
   ])
-  const mapCode = (row) => ({ code: trim(row.code), name: trim(row.name), price: money(row.price) })
+  const mapCode = (row) => ({
+    code: trim(row.code),
+    name: trim(row.name),
+    price: money(row.price),
+    credit: Number(row.credit) === 1 ? 1 : 0,
+  })
+  const allItems = (items.recordset || []).map(mapCode).filter((row) => row.code)
   return {
-    charges: (items.recordset || []).map(mapCode).filter((row) => row.code),
+    charges: allItems.filter((row) => row.credit === 0),
+    rebates: allItems.filter((row) => row.credit === 1),
     payments: (payments.recordset || []).map(mapCode).filter((row) => row.code),
     companies: (companies.recordset || []).map(mapCode).filter((row) => row.code),
   }

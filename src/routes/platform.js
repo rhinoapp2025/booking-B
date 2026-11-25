@@ -23,6 +23,10 @@ const {
   saveCatalogOptions,
 } = require('../utils/hotelCatalogOptions')
 const { setHotelBookingOpen } = require('../utils/bookingOpen')
+const {
+  scheduleHotelSharePageWrite,
+  syncAllHotelSharePages,
+} = require('../utils/sharePage')
 
 function normalizeSlug(raw) {
   return String(raw || '').trim().toLowerCase()
@@ -99,9 +103,26 @@ router.post('/hotels', async (req, res) => {
         website || null, star_rating || null, check_in_time || '14:00', check_out_time || '12:00',
       ]
     )
+    scheduleHotelSharePageWrite(normalized)
     res.status(201).json(result.rows[0])
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'slug already exists' })
+    res.status(500).json({ error: err.message })
+  }
+})
+
+/** เขียนหน้าแชร์ OG ทุกสาขาลง frontend dist (ไม่ต้อง rebuild booking-F) */
+router.post('/share-pages/sync', async (req, res) => {
+  try {
+    const result = await syncAllHotelSharePages()
+    if (result.skipped) {
+      return res.status(400).json({
+        error: result.reason || 'SHARE_STATIC_DIR not set',
+        hint: 'ตั้ง SHARE_STATIC_DIR ให้ชี้โฟลเดอร์ dist ของ booking-F บนเซิร์ฟเวอร์',
+      })
+    }
+    res.json(result)
+  } catch (err) {
     res.status(500).json({ error: err.message })
   }
 })

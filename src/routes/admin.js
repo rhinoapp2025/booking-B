@@ -20,6 +20,7 @@ const { isHotelFeatureEnabled } = require('../utils/hotelFeatureFlags')
 const { setHotelBookingOpen } = require('../utils/bookingOpen')
 const { getHotelBookingPolicies, applyBookingPolicies, normalizeCancellationPolicy } = require('../utils/bookingPolicies')
 const { attachHotelBranding, saveHotelUiImage, removeHotelUiImage } = require('../utils/hotelBranding')
+const { scheduleHotelSharePageWrite } = require('../utils/sharePage')
 const { attachHotelTheme } = require('../utils/hotelTheme')
 const { ROOM_HOLD_STATUS_SQL } = require('../utils/availableRooms')
 const { notifyAdminNewBookingChat } = require('../utils/bookingChatNotify')
@@ -1434,6 +1435,9 @@ router.patch('/:hotelSlug/info', requireHotelAdmin, async (req, res) => {
     if (Object.prototype.hasOwnProperty.call(patch, 'is_active')) {
       await setHotelBookingOpen(pool, hotel.id, patch.is_active)
     }
+    if (patch.name != null || patch.description != null) {
+      scheduleHotelSharePageWrite(hotel.slug)
+    }
     res.json(shapeHotel(r.rows[0]))
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -1485,6 +1489,9 @@ router.patch('/:hotelSlug/config', requireHotelAdmin, async (req, res) => {
       if (Object.prototype.hasOwnProperty.call(hotelPatch, 'is_active')) {
         await setHotelBookingOpen(pool, hotel.id, hotelPatch.is_active)
       }
+      if (hotelPatch.name != null || hotelPatch.description != null) {
+        scheduleHotelSharePageWrite(hotel.slug)
+      }
     }
 
     const settingsPatch = pickConfigSettings(req.body)
@@ -1529,6 +1536,9 @@ router.post('/:hotelSlug/ui-image', requireHotelAdmin, async (req, res) => {
       req.body?.imageMime
     )
     if (result.error) return res.status(result.status || 400).json({ error: result.error })
+    if (String(req.body?.kind || '').trim().toLowerCase() === 'logo') {
+      scheduleHotelSharePageWrite(hotel.slug)
+    }
     res.json(result)
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -1542,6 +1552,9 @@ router.delete('/:hotelSlug/ui-image/:kind', requireHotelAdmin, async (req, res) 
     if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
     const result = await removeHotelUiImage(pool, hotel, req.params.kind)
     if (result.error) return res.status(result.status || 400).json({ error: result.error })
+    if (String(req.params.kind || '').trim().toLowerCase() === 'logo') {
+      scheduleHotelSharePageWrite(hotel.slug)
+    }
     res.json(result)
   } catch (err) {
     res.status(500).json({ error: err.message })

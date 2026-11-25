@@ -18,7 +18,7 @@ const {
   getStorageMarker,
 } = require('./utils/uploadPaths')
 
-const { shareBotMiddleware } = require('./utils/sharePage')
+const { shareBotMiddleware, scheduleSyncAllHotelSharePages } = require('./utils/sharePage')
 
 const app = express()
 
@@ -82,6 +82,8 @@ async function startServer() {
     if (storage.bootCount > 1) {
       console.log(`💾 Storage persists across restarts (boot #${storage.bootCount}, since ${storage.firstSeenAt})`)
     }
+    // เขียนหน้าแชร์ OG ทุกสาขาลง frontend dist (ถ้าตั้ง SHARE_STATIC_DIR)
+    scheduleSyncAllHotelSharePages()
   })
 
   // ยกเลิกการจองที่ไม่ชำระมัดจำภายในเวลาที่กำหนด (ทุก 5 นาที)

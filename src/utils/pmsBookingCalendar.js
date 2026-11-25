@@ -1884,27 +1884,204 @@ async function createReservation({ dbName, hotelID, userId, values }) {
   }
 }
 
+function transferRoomError(code) {
+  if (code === 1) return 'ไม่พบห้องต้นทาง'
+  if (code === 2) return 'ไม่พบห้องปลายทาง'
+  if (code === 3) return 'ห้องปลายทางมีแขกเข้าพักแล้ว'
+  if (code === 4) return 'ห้องปลายทางอยู่ในสถานะ Out of Order'
+  if (code === 5) return 'ห้องปลายทางมีการจองซ้อน'
+  return `ย้ายห้องไม่สำเร็จ (code ${code})`
+}
+
+async function roomRowOf(pool, hotelID, roomNo) {
+  const result = await pool.request()
+    .input('RoomNo', sql.VarChar(7), trim(roomNo))
+    .input('HotelId', sql.Int, Number(hotelID))
+    .query(`
+      SELECT TOP 1
+        LTRIM(RTRIM(RmNum)) AS RoomNo,
+        LTRIM(RTRIM(RmType)) AS RoomType,
+        ISNULL(RmRateAmt, 0) AS RoomRate,
+        LTRIM(RTRIM(ISNULL(RmGstName1, ''))) AS GuestName,
+        LTRIM(RTRIM(ISNULL(RmStatus, ''))) AS RmStatus,
+        ResvNo
+      FROM RmSetupNum
+      WHERE LTRIM(RTRIM(RmNum)) = @RoomNo AND HotelID = @HotelId
+    `)
+  return result.recordset?.[0] || null
+}
+
 /**
- * ย้ายการจองไปห้อง/วันใหม่แบบลากใน Booking Calendar ของ PMS (Sp_Transfer_Resv)
- * ต่างจาก PMS ตรงที่ตรวจห้องปลายทางที่เซิร์ฟเวอร์ และใช้วันเข้าพักจริงของการจอง
- * ย้ายได้เฉพาะการจองที่ยืนยันแล้วและยังไม่เช็คอิน (แถบสีเหลือง)
+ * ย้ายแขกเช็คอินแล้วไปห้องอื่น แบบ Front Desk Room Status (Sp_TransferRoom)
+ * ย้ายได้เฉพาะห้อง วันเข้าพัก/ออกไม่เปลี่ยน
  */
-async function moveReservation({ dbName, hotelID, comNo, resvNo, roomNo, newRoomNo, newArrival }) {
-  const target = trim(newRoomNo)
-  const arrivalNew = trim(newArrival)
-  if (!target || target.length > 7) throw fail('ไม่ได้ระบุห้องปลายทาง')
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(arrivalNew)) throw fail('วันเข้าพักใหม่ไม่ถูกต้อง')
+async function getTransferReasons({ dbName, hotelID }) {
+  const pool = await connectDynamicDB(dbName)
+  try {
+    const result = await pool.request()
+      .input('HotelID', sql.Int, Number(hotelID))
+      .query(`
+        SELECT LTRIM(RTRIM(ResName)) AS name
+        FROM Reason_Config
+        WHERE HotelID = @HotelID AND ResGroup = 2
+        ORDER BY ResName ASC
+      `)
+    const names = (result.recordset || []).map((row) => trim(row.name)).filter(Boolean)
+    // รายการสำรองเหมือน Front Desk ถ้าโรงแรมยังไม่ตั้ง Reason_Config
+    if (!names.length) {
+      return {
+        reasons: [
+          'Electricity Repair',
+          'Water Repair',
+          'Air Condition Repair',
+          'Room Repair',
+          'Close Floor',
+          'Guest Request',
+        ].map((name) => ({ name })),
+      }
+    }
+    return { reasons: names.map((name) => ({ name })) }
+  } catch {
+    return {
+      reasons: [
+        'Electricity Repair',
+        'Water Repair',
+        'Air Condition Repair',
+        'Room Repair',
+        'Close Floor',
+        'Guest Request',
+      ].map((name) => ({ name })),
+    }
+  } finally {
+    try { await pool.close() } catch { /* ignore */ }
+  }
+}
+
+async function transferInhouseRoom({ dbName, hotelID, comNo, resvNo, roomNo, newRoomNo, userId, remark }) {
+  const sourceNo = trim(roomNo)
+  const targetNo = trim(newRoomNo)
+  const user = trim(userId).slice(0, 20) || 'webadmin'
+  const why = trim(remark).slice(0, 32)
+  if (!sourceNo || !targetNo) throw fail('ไม่ได้ระบุห้อง')
+  if (roomKey(sourceNo) === roomKey(targetNo)) throw fail('อยู่ห้องเดิม ไม่มีอะไรต้องย้าย')
+  if (!why) throw fail('กรุณากรอกเหตุผลในการย้ายห้อง')
   if (!comNo) throw fail('ยังไม่ได้ตั้งค่า ComNo ของ PMS')
 
   const pool = await connectDynamicDB(dbName)
   try {
+    const context = await loadCheckInContext(pool, { dbName, hotelID, resvNo, roomNo: sourceNo })
+    const { main, rows, reservationNo, arrival, departure, sysDate } = context
+    if (rows.some((row) => isGroupResv(row.GroupResv))) throw fail('การจองแบบกรุ๊ป กรุณาย้ายจาก PMS')
+    if (!rows.some(isCheckedIn)) throw fail('แขกยังไม่เช็คอิน กรุณาย้ายแบบการจอง')
+    if (roomKey(main.RoomNo) !== roomKey(sourceNo)) throw fail(`การจองนี้ไม่ได้ผูกกับห้อง ${sourceNo}`)
+    if (!arrival || !departure || departure <= arrival) throw fail('การจองนี้ยังไม่มีวันที่เข้าพักหรือวันที่ออก')
+
+    const fromRoom = await roomRowOf(pool, hotelID, sourceNo)
+    const toRoom = await roomRowOf(pool, hotelID, targetNo)
+    if (!fromRoom) throw fail(`ไม่พบห้องต้นทาง ${sourceNo}`)
+    if (!toRoom) throw fail(`ไม่พบห้องปลายทาง ${targetNo}`)
+    if (trim(fromRoom.RmStatus).toUpperCase() !== 'CI') throw fail(`ห้อง ${sourceNo} ไม่ได้อยู่สถานะเข้าพัก`)
+    if (Number(fromRoom.ResvNo) !== Number(reservationNo)) {
+      throw fail('เลขจองในห้องไม่ตรง โหลดปฏิทินใหม่แล้วลองอีกครั้ง', 409)
+    }
+
+    // ห้องปลายทางต้องว่างช่วงที่เหลือของสเตย์ (จากวันทำการถึงคืนก่อนออก)
+    const own = String(reservationNo)
+    const today = todayBangkok()
+    const checkFrom = arrival < (sysDate || today) ? (sysDate || today) : arrival
+    const checkTo = addDays(departure, -1)
+    if (checkTo >= checkFrom) {
+      const forecast = await loadForecast(pool, { hotelID, comNo, bgn: checkFrom, end: checkTo })
+      const targetRow = forecast.rows.find((row) => roomKey(row.RoomNo) === roomKey(targetNo))
+      if (!targetRow) throw fail(`ไม่พบห้อง ${targetNo} ใน PMS`)
+      for (let i = 0; i < forecast.totalDays; i += 1) {
+        const cell = parseForecastCell(targetRow[`D${i + 1}`])
+        if (!cell) continue
+        if (cell.resvNo === own) continue
+        throw fail(`ห้อง ${targetNo} ไม่ว่างวันที่ ${thaiDate(addDays(checkFrom, i))}${cell.guest ? ` (${cell.guest})` : ''}`)
+      }
+    }
+
+    const guestName = trim(fromRoom.GuestName) || `${trim(main.GstFName)} ${trim(main.GstLName)}`.trim()
+    const result = await pool.request()
+      .input('OldRoomNo', sql.VarChar(7), trim(fromRoom.RoomNo))
+      .input('NewRoomNo', sql.VarChar(7), trim(toRoom.RoomNo))
+      .input('OldRoomType', sql.VarChar(5), trim(fromRoom.RoomType))
+      .input('NewRoomType', sql.VarChar(5), trim(toRoom.RoomType))
+      .input('OldRmRate', sql.Float, money(fromRoom.RoomRate) || money(main.RoomRateAmt))
+      .input('NewRmRate', sql.Float, money(toRoom.RoomRate) || money(main.RoomRateAmt))
+      .input('GstName', sql.VarChar(40), guestName.slice(0, 40))
+      .input('Remark', sql.VarChar(32), why)
+      .input('UserName', sql.VarChar(16), user.slice(0, 16))
+      .input('HotelId', sql.Int, Number(hotelID))
+      .input('BussDate', sql.DateTime, dateParam(sysDate || today))
+      .output('ResvBookNo', sql.Int)
+      .execute('Sp_TransferRoom')
+
+    const code = Number(result.returnValue)
+    if (code !== 0) throw fail(transferRoomError(code))
+
+    const fresh = await roomRowOf(pool, hotelID, trim(toRoom.RoomNo))
+    if (!fresh || trim(fresh.RmStatus).toUpperCase() !== 'CI' || Number(fresh.ResvNo) !== Number(reservationNo)) {
+      throw fail('PMS ไม่ได้ย้ายห้องนี้ กรุณาตรวจสอบและย้ายจาก Front Desk', 409)
+    }
+    return {
+      ok: true,
+      kind: 'inhouse',
+      resvNo: own,
+      fromRoom: trim(fromRoom.RoomNo),
+      roomNo: trim(toRoom.RoomNo),
+      arrival,
+      departure,
+    }
+  } finally {
+    try { await pool.close() } catch { /* ignore */ }
+  }
+}
+
+/**
+ * ย้ายจากปฏิทิน:
+ * - แถบเหลือง (ยังไม่เช็คอิน) → Sp_Transfer_Resv ย้ายห้องและ/หรือวัน
+ * - แถบชมพู (เช็คอินแล้ว) → Sp_TransferRoom ย้ายห้องอย่างเดียว แบบ Front Desk Room Status
+ */
+async function moveReservation({ dbName, hotelID, comNo, resvNo, roomNo, newRoomNo, newArrival, userId, remark }) {
+  const target = trim(newRoomNo)
+  const arrivalNew = trim(newArrival)
+  if (!target || target.length > 7) throw fail('ไม่ได้ระบุห้องปลายทาง')
+  if (!comNo) throw fail('ยังไม่ได้ตั้งค่า ComNo ของ PMS')
+
+  const pool = await connectDynamicDB(dbName)
+  let checkedIn = false
+  try {
     const context = await loadCheckInContext(pool, { dbName, hotelID, resvNo, roomNo })
+    checkedIn = context.rows.some(isCheckedIn)
+  } finally {
+    try { await pool.close() } catch { /* ignore */ }
+  }
+
+  if (checkedIn) {
+    return transferInhouseRoom({
+      dbName,
+      hotelID,
+      comNo,
+      resvNo,
+      roomNo,
+      newRoomNo: target,
+      userId,
+      remark,
+    })
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(arrivalNew)) throw fail('วันเข้าพักใหม่ไม่ถูกต้อง')
+
+  const editPool = await connectDynamicDB(dbName)
+  try {
+    const context = await loadCheckInContext(editPool, { dbName, hotelID, resvNo, roomNo })
     const { main, rows, reservationNo, arrival, departure, sysDate } = context
     const source = trim(main.RoomNo)
     if (rows.some((row) => isGroupResv(row.GroupResv))) throw fail('การจองแบบกรุ๊ป กรุณาย้ายจาก PMS')
     if (roomKey(source) !== roomKey(context.room)) throw fail(`การจองนี้ไม่ได้ผูกกับห้อง ${context.room}`)
     if (trim(main.ResvStatus).toUpperCase() === 'CXL') throw fail('การจองนี้ถูกยกเลิกแล้ว')
-    if (rows.some(isCheckedIn)) throw fail('แขกเช็คอินแล้ว ย้ายจากปฏิทินไม่ได้')
     if (!arrival || !departure || departure <= arrival) throw fail('การจองนี้ยังไม่มีวันที่เข้าพักหรือวันที่ออก')
 
     const nights = nightsBetween(arrival, departure)
@@ -1919,19 +2096,17 @@ async function moveReservation({ dbName, hotelID, comNo, resvNo, roomNo, newRoom
     const today = todayBangkok()
     const rowOf = (list, roomNo) => list.find((row) => roomKey(row.RoomNo) === roomKey(roomNo))
 
-    // 1) แถบต้นทางต้องเป็นการจองที่ยืนยันแล้ว (สีเหลือง) ของเลขจองนี้
     const seenFrom = arrival < today ? today : arrival
     if (seenFrom >= departure) throw fail('การจองนี้เลยวันเข้าพักไปแล้ว ย้ายไม่ได้')
-    const before = await loadForecast(pool, { hotelID, comNo, bgn: seenFrom, end: seenFrom })
+    const before = await loadForecast(editPool, { hotelID, comNo, bgn: seenFrom, end: seenFrom })
     const sourceCell = parseForecastCell(rowOf(before.rows, source)?.D1)
     if (!sourceCell || sourceCell.resvNo !== own) throw fail('ไม่พบการจองนี้ในห้องต้นทาง โหลดปฏิทินใหม่แล้วลองอีกครั้ง', 409)
-    if (sourceCell.kind !== 'booked') throw fail('ย้ายได้เฉพาะการจองที่ยืนยันแล้วและยังไม่เช็คอิน')
+    if (sourceCell.kind !== 'booked') throw fail('ย้ายวันได้เฉพาะการจองที่ยืนยันแล้วและยังไม่เช็คอิน')
 
-    // 2) ห้องปลายทางต้องว่างทุกคืน ยกเว้นคืนที่เป็นของการจองนี้เองเมื่อเลื่อนวันในห้องเดิม
     const checkFrom = arrivalNew < today ? today : arrivalNew
     const checkTo = addDays(departureNew, -1)
     if (checkTo < checkFrom) throw fail('ช่วงวันใหม่อยู่ในอดีต ย้ายไม่ได้')
-    const after = await loadForecast(pool, { hotelID, comNo, bgn: checkFrom, end: checkTo })
+    const after = await loadForecast(editPool, { hotelID, comNo, bgn: checkFrom, end: checkTo })
     const targetRow = rowOf(after.rows, target)
     if (!targetRow) throw fail(`ไม่พบห้อง ${target} ใน PMS`)
     for (let i = 0; i < after.totalDays; i += 1) {
@@ -1946,7 +2121,7 @@ async function moveReservation({ dbName, hotelID, comNo, resvNo, roomNo, newRoom
     }
 
     const targetRoomNo = trim(targetRow.RoomNo)
-    await pool.request()
+    await editPool.request()
       .input('HotelId', sql.Int, Number(hotelID))
       .input('RoomNo', sql.VarChar(7), source)
       .input('NewRoomNo', sql.VarChar(7), targetRoomNo)
@@ -1954,8 +2129,7 @@ async function moveReservation({ dbName, hotelID, comNo, resvNo, roomNo, newRoom
       .input('ArrDateNew', sql.DateTime, dateParam(arrivalNew))
       .execute('dbo.Sp_Transfer_Resv')
 
-    // 3) ยืนยันผลจากข้อมูลจริง เพราะ Sp_Transfer_Resv ไม่ส่งผลลัพธ์กลับ
-    const reread = await pool.request()
+    const reread = await editPool.request()
       .input('ResvNo', sql.Int, reservationNo)
       .input('GstNo', sql.Int, Number(main.GstNo))
       .query(`
@@ -1970,6 +2144,7 @@ async function moveReservation({ dbName, hotelID, comNo, resvNo, roomNo, newRoom
     }
     return {
       ok: true,
+      kind: 'booked',
       resvNo: own,
       fromRoom: source,
       roomNo: targetRoomNo,
@@ -1977,7 +2152,7 @@ async function moveReservation({ dbName, hotelID, comNo, resvNo, roomNo, newRoom
       departure: trim(fresh.DeptYmd) || departureNew,
     }
   } finally {
-    try { await pool.close() } catch { /* ignore */ }
+    try { await editPool.close() } catch { /* ignore */ }
   }
 }
 
@@ -1994,6 +2169,7 @@ module.exports = {
   updateReservationInfo,
   getNewBookingInfo,
   createReservation,
+  getTransferReasons,
   moveReservation,
   todayBangkok,
   addDays,

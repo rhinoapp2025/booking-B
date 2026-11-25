@@ -2046,7 +2046,21 @@ router.post('/:hotelSlug/pms-calendar/booking', requireHotelAdmin, async (req, r
   }
 })
 
-// POST /api/admin/:hotelSlug/pms-calendar/move — ลากย้ายการจองที่ยังไม่เช็คอินไปห้อง/วันใหม่
+// GET /api/admin/:hotelSlug/pms-calendar/transfer-reasons — เหตุผลย้ายห้อง (ResGroup=2) แบบ Front Desk
+router.get('/:hotelSlug/pms-calendar/transfer-reasons', requireHotelAdmin, async (req, res) => {
+  try {
+    const pool = getPool()
+    const hotel = await resolveHotel(pool, req.params.hotelSlug)
+    if (!hotel) return res.status(404).json({ error: 'Hotel not found' })
+    const pms = await pmsConnection(pool, hotel)
+    const { getTransferReasons } = require('../utils/pmsBookingCalendar')
+    res.json(await getTransferReasons({ dbName: pms.dbName, hotelID: pms.hotelID }))
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message })
+  }
+})
+
+// POST /api/admin/:hotelSlug/pms-calendar/move — ลากย้ายเหลือง/ชมพู
 router.post('/:hotelSlug/pms-calendar/move', requireHotelAdmin, async (req, res) => {
   try {
     const pool = getPool()
@@ -2062,6 +2076,8 @@ router.post('/:hotelSlug/pms-calendar/move', requireHotelAdmin, async (req, res)
       roomNo: req.body?.roomNo,
       newRoomNo: req.body?.newRoomNo,
       newArrival: req.body?.newArrival,
+      userId: req.body?.userId,
+      remark: req.body?.remark,
     }))
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message })
